@@ -106,7 +106,7 @@ class SectionController extends Controller
             'message' => 'Available and occupied stalls fetched successfully.',
             'data' => $sections
         ], 200);
-    }
+    }   
 
     public function update(Request $request, $id)
     {

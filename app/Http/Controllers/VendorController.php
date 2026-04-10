@@ -377,6 +377,25 @@ public function getRentedStallsForVendor()
     $totalRemainingBalance = 0;
 
     $mappedStalls = $rentedStalls->map(function ($rented) use (&$totalRemainingBalance) {
+        // Skip processing for unoccupied rentals - they should not be updated
+        if ($rented->status === 'unoccupied') {
+            return [
+                'id' => $rented->id,
+                'stall_id' => $rented->stall_id,
+                'stall_number' => $rented->stall->stall_number ?? 'N/A',
+                'section_name' => $rented->stall->section->name ?? 'N/A',
+                'status' => 'unoccupied',
+                'color' => '#808080ff',
+                'missed_days' => $rented->missed_days ?? 0,
+                'remaining_balance' => 0,
+                'daily_rent' => $rented->daily_rent,
+                'monthly_rent' => $rented->monthly_rent,
+                'last_payment_date' => $rented->last_payment_date,
+                'next_due_date' => null,
+                'is_active' => false,
+            ];
+        }
+        
         $today = now();
         $status = 'occupied'; // default status
         $color = 'red'; // default color for occupied
@@ -551,16 +570,16 @@ public function getRentedStallsForVendor()
             $remainingBalance = 0;
         }
 
-        // Update the rented record with new values if changed (but not for inactive stalls)
-        if ($missedDays !== $rented->missed_days && $status !== 'temp_closed' && $status !== 'inactive') {
+        // Update the rented record with new values if changed (but not for inactive, unoccupied, or temp_closed stalls)
+        if ($missedDays !== $rented->missed_days && $status !== 'temp_closed' && $status !== 'inactive' && $status !== 'unoccupied') {
             $rented->update(['missed_days' => $missedDays]);
         }
-        if ($remainingBalance !== $rented->remaining_balance && $status !== 'inactive') {
+        if ($remainingBalance !== $rented->remaining_balance && $status !== 'inactive' && $status !== 'unoccupied') {
             $rented->update(['remaining_balance' => $remainingBalance]);
         }
 
-        // Add to total remaining balance (exclude temp_closed and inactive from total)
-        if ($status !== 'temp_closed' && $status !== 'inactive' && $remainingBalance > 0) {
+        // Add to total remaining balance (exclude temp_closed, inactive, and unoccupied from total)
+        if ($status !== 'temp_closed' && $status !== 'inactive' && $status !== 'unoccupied' && $remainingBalance > 0) {
             $totalRemainingBalance += $remainingBalance;
         }
 
@@ -840,6 +859,15 @@ public function payAdvance(Request $request)
     ]);
 
     $rented = Rented::with('application.vendor', 'stall')->findOrFail($request->rented_id);
+    
+    // Check if rental is unoccupied before processing payment
+    if ($rented->status === 'unoccupied') {
+        return response()->json([
+            'success' => false,
+            'message' => 'Cannot process payment for unoccupied rental'
+        ], 422);
+    }
+    
     $vendor = $rented->application->vendor;
     $vendorId = $vendor->id;
     $stallNumber = $rented->stall->stall_number ?? 'N/A';

@@ -708,6 +708,115 @@ public function DepartmentsReport(Request $request)
     ]);
 }
 
+public function vendorDetails(Request $request)
+{
+    $vendorName = $request->query('vendor_name');
+    
+    if (!$vendorName) {
+        return response()->json([
+            'status' => 'error',
+            'message' => 'Vendor name is required'
+        ], 400);
+    }
+
+    // Get all rentals for this vendor with detailed information
+    $rentals = Rented::with([
+        'vendor',
+        'stall.section.area',
+        'payments' => function($query) {
+            $query->orderBy('payment_date', 'desc');
+        }
+    ])
+    ->whereHas('vendor', function($query) use ($vendorName) {
+        $query->whereRaw("CONCAT(first_name, ' ', middle_name, ' ', last_name) = ?", [$vendorName]);
+    })
+    ->get();
+
+    if ($rentals->isEmpty()) {
+        return response()->json([
+            'status' => 'error',
+            'message' => 'Vendor not found or has no rentals'
+        ], 404);
+    }
+
+    // Group rentals by section and calculate totals
+    $sectionName = 'Open Space';
+    $firstRental = $rentals->first();
+    $area = $firstRental->stall->section->area ?? null;
+    if ($area && strtolower(trim($area->name)) !== 'open space') {
+        $sectionName = $firstRental->stall->section->name ?? 'Unknown Section';
+    }
+
+    $totalDailyRental = $rentals->sum('daily_rent');
+    $totalMonthlyRental = $rentals->sum('monthly_rent');
+
+    // Prepare stall details with status
+    $stallDetails = $rentals->map(function($rental) {
+        $lastPayment = $rental->payments->first();
+        
+        return [
+            'rented_id' => $rental->id,
+            'stall_number' => $rental->stall->stall_number ?? 'N/A',
+            'section_name' => $rental->stall->section->name ?? 'N/A',
+            'status' => $rental->status ?? 'active',
+            'daily_rent' => floatval($rental->daily_rent ?? 0),
+            'monthly_rent' => floatval($rental->monthly_rent ?? 0),
+            'last_payment_date' => $lastPayment?->payment_date,
+            'last_payment_amount' => floatval($lastPayment?->amount ?? 0),
+            'created_at' => $rental->created_at->format('Y-m-d'),
+        ];
+    });
+
+    return response()->json([
+        'status' => 'success',
+        'data' => [
+            'vendor_name' => $vendorName,
+            'section_name' => $sectionName,
+            'total_stalls' => $rentals->count(),
+            'total_daily_rental' => $totalDailyRental,
+            'total_monthly_rental' => $totalMonthlyRental,
+            'stall_details' => $stallDetails->toArray(),
+        ]
+    ]);
+}
+
+public function updateRentedAt(Request $request, $rentedId)
+{
+    try {
+        $rented = Rented::find($rentedId);
+        
+        if (!$rented) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Rented record not found'
+            ], 404);
+        }
+
+        $request->validate([
+            'rented_at' => 'required|date'
+        ]);
+
+        // Update the created_at field with the new rented_at date
+        $rented->created_at = $request->rented_at;
+        $rented->save();
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Rented at date updated successfully',
+            'data' => [
+                'rented_id' => $rented->id,
+                'new_rented_at' => $rented->created_at->format('Y-m-d')
+            ]
+        ]);
+        
+    } catch (\Exception $e) {
+        return response()->json([
+            'status' => 'error',
+            'message' => 'Failed to update rented at date: ' . $e->getMessage()
+        ], 500);
+    }
+}
+
 public function rentalReport(Request $request)
 {
     // Get active rentals with vendor, stall, section, and area information

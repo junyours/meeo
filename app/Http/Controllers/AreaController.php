@@ -21,7 +21,7 @@ public function index()
                 $missedDays = 0;
                 $nextDueDate = null;
 
-                $rented = $stall->rented;
+                $rented = $stall->currentRental;
 
                 // 🔹 1. INACTIVE STALL (highest priority)
                 if (!$stall->is_active) {
@@ -34,22 +34,102 @@ public function index()
                 // 🔹 2. RENTED STALL
                 elseif ($rented && $stall->status !== 'vacant') {
 
-                    $today = now();
+                    $today = now()->startOfDay();
 
-                    // Determine next due date
-                    if ($rented->next_due_date) {
-                        $nextDueDate = Carbon::parse($rented->next_due_date);
+                    // Use created_at as rental start date for missed days calculation
+                    $rentalStart = Carbon::parse($rented->created_at)->startOfDay();
+
+                    // Determine next due date based on payment history
+                    $latestPayment = $rented->payments()->latest('payment_date')->first();
+                    
+                    // Check if stall is monthly
+                    $isMonthlyStall = $stall->is_monthly ?? false;
+                    
+                    if ($latestPayment) {
+                        // Check if there's a payment for today
+                        $paidToday = $latestPayment && Carbon::parse($latestPayment->payment_date)->isSameDay($today);
+                        
+                        if ($isMonthlyStall) {
+                            // Monthly stall: calculate missed months
+                            $missedMonths = 0;
+                            $expectedPaymentMonth = $rentalStart->copy();
+                            
+                            while ($expectedPaymentMonth->lt($today)) {
+                                $hasPaymentForMonth = $rented->payments()
+                                    ->whereYear('payment_date', $expectedPaymentMonth->year)
+                                    ->whereMonth('payment_date', $expectedPaymentMonth->month)
+                                    ->whereIn('status', ['collected', 'remitted'])
+                                    ->exists();
+                                
+                                if (!$hasPaymentForMonth) {
+                                    $missedMonths++;
+                                }
+                                
+                                $expectedPaymentMonth->addMonth();
+                            }
+                            
+                            // Store missed months in missed_days field (reuse column)
+                            $missedDays = $missedMonths;
+                        } else {
+                            // Daily stall: calculate missed days (existing logic)
+                            $expectedPaymentDate = $rentalStart->copy();
+                            $calculatedMissedDays = 0;
+                            
+                            while ($expectedPaymentDate->lt($today)) {
+                                $hasPaymentForDay = $rented->payments()
+                                    ->whereDate('payment_date', $expectedPaymentDate)
+                                    ->whereIn('status', ['collected', 'remitted'])
+                                    ->exists();
+                                
+                                if (!$hasPaymentForDay) {
+                                    $calculatedMissedDays++;
+                                }
+                                
+                                $expectedPaymentDate->addDay();
+                            }
+                            
+                            $missedDays = $calculatedMissedDays;
+                        }
+                        
+                        if ($latestPayment->payment_date) {
+                            // Handle advance payments like StallController does
+                            $advanceDays = $latestPayment->advance_days ?? 1;
+                            $nextDueDate = Carbon::parse($latestPayment->payment_date)->addDays($advanceDays);
+                        } else {
+                            $nextDueDate = $rentalStart->copy()->addDay();
+                        }
                     } else {
-                        $baseDate = $rented->last_payment_date
-                            ? Carbon::parse($rented->last_payment_date)
-                            : Carbon::parse($rented->created_at);
-
-                        $nextDueDate = $baseDate->copy()->addDay();
+                        // No payments yet
+                        $paidToday = false;
+                        
+                        if ($isMonthlyStall) {
+                            // Monthly stall: calculate missed months from rental start
+                            $missedMonths = 0;
+                            $expectedPaymentMonth = $rentalStart->copy();
+                            
+                            while ($expectedPaymentMonth->lt($today)) {
+                                $missedMonths++;
+                                $expectedPaymentMonth->addMonth();
+                            }
+                            
+                            $missedDays = $missedMonths;
+                        } else {
+                            // Daily stall: calculate missed days from rental start (same logic as above)
+                            $calculatedMissedDays = 0;
+                            $expectedPaymentDate = $rentalStart->copy();
+                            
+                            while ($expectedPaymentDate->lt($today)) {
+                                $calculatedMissedDays++;
+                                $expectedPaymentDate->addDay();
+                            }
+                            
+                            $missedDays = $calculatedMissedDays;
+                        }
+                        $nextDueDate = $rentalStart->copy()->addDay();
                     }
 
                     // 🔹 Check if paid today
-                    $paidToday = $rented->last_payment_date &&
-                        Carbon::parse($rented->last_payment_date)->isSameDay($today);
+                    $paidToday = $latestPayment && Carbon::parse($latestPayment->payment_date)->isSameDay($today);
 
                     // 🔹 ADVANCE (still covered)
                     if ($rented->status === 'advance' && $today->lte($nextDueDate)) {
@@ -67,13 +147,28 @@ public function index()
                         $color = '#074c00ff';
 
                     }
-                    // 🔹 PARTIAL (keep stored missed days)
+                    // 🔹 PARTIAL (check missed days first)
                     elseif ($rented->status === 'partial') {
-
-                        $status = 'partial';
+                        
                         $missedDays = (int) ($rented->missed_days ?? 0);
-                        $color = '#00f7ffff';
-
+                        
+                        // 🔥 Auto temp close at 4 (days or months) but KEEP incrementing
+                        if ($missedDays >= 4) {
+                            
+                            if ($rented->status !== 'temp_closed' && $rented->status !== 'unoccupied') {
+                                $rented->status = 'temp_closed';
+                                $rented->save();
+                            }
+                            
+                            $status = 'temp_closed';
+                            $color = '#ff4d00ff';
+                            
+                        } else {
+                            
+                            $status = 'partial';
+                            $color = '#00f7ffff';
+                            
+                        }
                     }
                     else {
 
@@ -93,21 +188,20 @@ public function index()
                             $missedDays = 0;
 
                         }
-                        // 🔥 OVERDUE (this is where missed days continue increasing)
+                        // 🔥 OVERDUE (this is where missed days/months continue increasing)
                         else {
 
-                            $missedDays = $today->diffInDays($nextDueDate);
-
-                            // Always update DB
-                            if ($rented->missed_days != $missedDays) {
+                            // Always update DB (but not for unoccupied rentals)
+                            if ($rented->missed_days != $missedDays && $rented->status !== 'unoccupied') {
                                 $rented->missed_days = $missedDays;
                                 $rented->save();
                             }
 
-                            // 🔥 Auto temp close at 4 but KEEP incrementing
+                            // 🔥 For monthly stalls: red for 1-3 months, temp_closed at 4+ months
+                            // 🔥 For daily stalls: red for 1-3 days, temp_closed at 4+ days
                             if ($missedDays >= 4) {
 
-                                if ($rented->status !== 'temp_closed') {
+                                if ($rented->status !== 'temp_closed' && $rented->status !== 'unoccupied') {
                                     $rented->status = 'temp_closed';
                                     $rented->save();
                                 }
@@ -118,7 +212,7 @@ public function index()
                             } else {
 
                                 $status = 'missed';
-                                $color = '#eb7114ff';
+                                $color = '#eb1414ff'; // Red color for 1-3 missed days/months
 
                             }
                         }
@@ -146,6 +240,7 @@ public function index()
                     'updated_at'      => $stall->updated_at,
                     'is_active'       => $stall->is_active,
                     'message'         => $stall->message,
+                    'is_monthly'      => $stall->is_monthly,
                 ];
             });
 

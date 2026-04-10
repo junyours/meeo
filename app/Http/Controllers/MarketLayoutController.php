@@ -10,6 +10,7 @@ use App\Models\Rented;
 use App\Models\AdminActivity;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Validation\Rule;
 
 class MarketLayoutController extends Controller
@@ -341,12 +342,58 @@ class MarketLayoutController extends Controller
                 ], 422);
             }
 
-            // Check if stall is vacant
-            if ($stall->status !== 'vacant') {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Stall is not vacant and cannot be assigned'
-                ], 422);
+            // First, close any existing rental records for this stall (except already unoccupied ones)
+            Log::info('Starting vendor assignment - checking for existing rentals', [
+                'stall_id' => $stall->id,
+                'new_vendor_id' => $vendor->id,
+            ]);
+
+            $allRentals = Rented::where('stall_id', $stall->id)->get();
+            
+            Log::info('All rentals for this stall before assignment', [
+                'stall_id' => $stall->id,
+                'total_rentals' => $allRentals->count(),
+                'rentals' => $allRentals->map(function($r) {
+                    return [
+                        'id' => $r->id,
+                        'vendor_id' => $r->vendor_id,
+                        'status' => $r->status,
+                        'updated_at' => $r->updated_at->toDateTimeString(),
+                    ];
+                })
+            ]);
+
+            $existingRentals = Rented::where('stall_id', $stall->id)
+                ->where('status', '!=', 'unoccupied')
+                ->get();
+
+            Log::info('Found rentals to close', [
+                'stall_id' => $stall->id,
+                'rentals_to_close' => $existingRentals->count(),
+            ]);
+
+            foreach ($existingRentals as $existingRented) {
+                Log::info('Processing rental for closure', [
+                    'rental_id' => $existingRented->id,
+                    'vendor_id' => $existingRented->vendor_id,
+                    'current_status' => $existingRented->status,
+                ]);
+                
+                // Close the existing rental record with proper end date
+                $currentTime = now();
+                $existingRented->status = 'unoccupied';
+                $existingRented->updated_at = $currentTime; // Explicitly set updated_at
+                $existingRented->save(); 
+                
+                Log::info('Closed existing rental record', [
+                    'stall_id' => $stall->id,
+                    'rented_id' => $existingRented->id,
+                    'vendor_id' => $existingRented->vendor_id,
+                    'old_status' => 'occupied',
+                    'new_status' => $existingRented->status,
+                    'updated_at' => $existingRented->updated_at->toDateTimeString(),
+                    'current_time' => $currentTime->toDateTimeString(),
+                ]);
             }
 
             // Update stall with vendor information
@@ -360,7 +407,7 @@ class MarketLayoutController extends Controller
             $dailyRent = $this->computeDailyRate($stall, $section);
             $monthlyRent = $this->computeMonthlyRate($stall, $section);
 
-            // Create a rented record for this assignment
+            // Create a new rented record for this assignment
             $rented = Rented::create([
                 'vendor_id' => $vendor->id,
                 'stall_id' => $stall->id,

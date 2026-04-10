@@ -288,11 +288,7 @@ class CashTicketTypeController extends Controller
     public function saveDailyPayments(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'date' => 'required|date',
-            'payments' => 'required|array',
-            'payments.*.cash_ticket_id' => 'required|integer|exists:cash_tickets,id',
-            'payments.*.amount' => 'required|numeric|min:0',
-            'payments.*.notes' => 'nullable|string'
+            'date' => 'required|date'
         ]);
 
         if ($validator->fails()) {

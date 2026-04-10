@@ -23,6 +23,7 @@ class Rented extends Model
         'next_due_date',
         'status',
         'remaining_balance',
+        'updated_at',
     ];
 
     public function vendor()
@@ -41,6 +42,7 @@ class Rented extends Model
     }
 
     protected $casts = [
+        'created_at'       => 'datetime',
         'last_payment_date'   => 'datetime',
         'remaining_balance'   => 'decimal:2',
     ];

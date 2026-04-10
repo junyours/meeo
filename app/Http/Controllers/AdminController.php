@@ -265,6 +265,7 @@ public function validateVendor(Request $request, $id)
 public function display(Request $request)
 {
         $year = $request->query('year', date('Y'));
+        $month = $request->query('month'); // Optional month parameter
         
         // Basic stats
         $rentedStalls = Rented::whereIn('status', ['active', 'occupied', 'advance', 'temp_closed', 'partial', 'fully paid'])
@@ -281,12 +282,34 @@ public function display(Request $request)
         $monthlyExpectedCollection = $this->calculateExpectedCollection('monthly');
         
         // Calculate separate collections for Market, Open Space, and Taboc Gym
-        $marketCollections = $this->calculateAreaCollections('Market', 'daily');
-        $marketMonthlyCollections = $this->calculateAreaCollections('Market', 'monthly');
-        $openSpaceCollections = $this->calculateAreaCollections('Open Space', 'daily');
-        $openSpaceMonthlyCollections = $this->calculateAreaCollections('Open Space', 'monthly');
-        $tabocGymCollections = $this->calculateAreaCollections('Taboc Gym', 'daily');
-        $tabocGymMonthlyCollections = $this->calculateAreaCollections('Taboc Gym', 'monthly');
+        if ($month) {
+            // Get expected revenue (what should be collected) for specific month
+            $marketRevenue = $this->calculateAreaCollectionsForMonth('Market', 'monthly', $month, $year);
+            $openSpaceRevenue = $this->calculateAreaCollectionsForMonth('Open Space', 'monthly', $month, $year);
+            $tabocGymRevenue = $this->calculateAreaCollectionsForMonth('Taboc Gym', 'monthly', $month, $year);
+            
+            // Get actual collected amounts for specific month
+            $marketCollections = $this->getActualCollectionForMonth('Market', $month, $year);
+            $openSpaceCollections = $this->getActualCollectionForMonth('Open Space', $month, $year);
+            $tabocGymCollections = $this->getActualCollectionForMonth('Taboc Gym', $month, $year);
+            
+            // For compatibility, set monthly collections to actual amounts
+            $marketMonthlyCollections = $marketCollections;
+            $openSpaceMonthlyCollections = $openSpaceCollections;
+            $tabocGymMonthlyCollections = $tabocGymCollections;
+        } else {
+            // Default to expected collections for current period
+            $marketRevenue = $this->calculateAreaCollections('Market', 'monthly');
+            $openSpaceRevenue = $this->calculateAreaCollections('Open Space', 'monthly');
+            $tabocGymRevenue = $this->calculateAreaCollections('Taboc Gym', 'monthly');
+            
+            $marketCollections = $this->calculateAreaCollections('Market', 'daily');
+            $marketMonthlyCollections = $this->calculateAreaCollections('Market', 'monthly');
+            $openSpaceCollections = $this->calculateAreaCollections('Open Space', 'daily');
+            $openSpaceMonthlyCollections = $this->calculateAreaCollections('Open Space', 'monthly');
+            $tabocGymCollections = $this->calculateAreaCollections('Taboc Gym', 'daily');
+            $tabocGymMonthlyCollections = $this->calculateAreaCollections('Taboc Gym', 'monthly');
+        }
         
         // Get available years from payments
         $availableYears = Payments::selectRaw('YEAR(payment_date) as year')
@@ -419,10 +442,13 @@ public function display(Request $request)
                 'monthly_expected_collection' => $monthlyExpectedCollection,
                 'market_daily_collection' => $marketCollections,
                 'market_monthly_collection' => $marketMonthlyCollections,
+                'market_monthly_revenue' => $marketRevenue ?? $marketMonthlyCollections,
                 'open_space_daily_collection' => $openSpaceCollections,
                 'open_space_monthly_collection' => $openSpaceMonthlyCollections,
+                'open_space_monthly_revenue' => $openSpaceRevenue ?? $openSpaceMonthlyCollections,
                 'taboc_gym_daily_collection' => $tabocGymCollections,
                 'taboc_gym_monthly_collection' => $tabocGymMonthlyCollections,
+                'taboc_gym_monthly_revenue' => $tabocGymRevenue ?? $tabocGymMonthlyCollections,
                 'collection_comparison' => [
                     'market_daily_vs_expected' => $todayExpectedCollection > 0 ? 
                         round(($marketCollections / $todayExpectedCollection) * 100, 2) : 0,
@@ -439,6 +465,74 @@ public function display(Request $request)
             'available_years' => $availableYears,
         ]);
 }
+    
+    /**
+     * Get actual collection amount for specific area and month
+     */
+    private function getActualCollectionForMonth($areaType, $month, $year)
+    {
+        // Get areas based on type
+        if ($areaType === 'Market') {
+            // Market includes Wet and Dry areas
+            $areas = Area::whereIn('name', ['Wet', 'Dry', 'Wet Area', 'Dry Area'])->get();
+        } elseif ($areaType === 'Taboc Gym') {
+            // Taboc Gym is a specific section, not an area
+            $totalCollected = 0;
+            
+            // Get the Taboc Gym section specifically
+            $tabocGymSections = Sections::where('name', 'like', '%taboc%')
+                ->orWhere('name', 'like', '%gym%')
+                ->get();
+            
+            foreach ($tabocGymSections as $section) {
+                // Get payments for stalls in this section for specific month/year
+                $sectionPayments = Payments::whereHas('rented.stall.section', function($query) use ($section) {
+                        $query->where('id', $section->id);
+                    })
+                    ->whereMonth('payment_date', $month)
+                    ->whereYear('payment_date', $year)
+                    ->sum('amount');
+                
+                $totalCollected += $sectionPayments;
+            }
+            
+            return $totalCollected;
+        } else {
+            // Other area types (like Open Space) - exclude Taboc Gym sections
+            $areas = Area::where('name', $areaType)->get();
+        }
+        
+        $totalCollected = 0;
+        
+        foreach ($areas as $area) {
+            // Get sections in this area
+            $sectionsQuery = Sections::where('area_id', $area->id);
+            
+            // Exclude Taboc Gym sections when calculating Open Space collections
+            if ($areaType === 'Open Space') {
+                $sectionsQuery->where(function($query) {
+                    $query->where('name', 'not like', '%taboc%')
+                          ->orWhere('name', 'not like', '%gym%');
+                });
+            }
+            
+            $sections = $sectionsQuery->get();
+            
+            foreach ($sections as $section) {
+                // Get payments for stalls in this section for specific month/year
+                $sectionPayments = Payments::whereHas('rented.stall.section', function($query) use ($section) {
+                        $query->where('id', $section->id);
+                    })
+                    ->whereMonth('payment_date', $month)
+                    ->whereYear('payment_date', $year)
+                    ->sum('amount');
+                
+                $totalCollected += $sectionPayments;
+            }
+        }
+        
+        return $totalCollected;
+    }
     
     /**
      * Calculate expected collection for occupied stalls
@@ -592,10 +686,31 @@ public function display(Request $request)
                     })
                     ->where('status', '!=', 'unoccupied');
                 
-                // Apply month/year filter if provided
+                // Apply month/year filter for rentals active during that period
                 if ($month && $year) {
-                    $query->whereMonth('created_at', $month)
-                          ->whereYear('created_at', $year);
+                    // Get rentals that were active during the selected month/year
+                    // Either they started before the end of the month and haven't ended,
+                    // or they were created during that month
+                    $query->where(function($q) use ($month, $year) {
+                        $monthEnd = Carbon::create($year, $month, 1)->endOfMonth();
+                        $q->where(function($subQuery) use ($month, $year, $monthEnd) {
+                            // Rentals created during or before the month and still active
+                            $subQuery->whereYear('created_at', '<=', $year)
+                                    ->whereMonth('created_at', '<=', $month)
+                                    ->where(function($activeQuery) {
+                                        $activeQuery->where('status', 'active')
+                                                   ->orWhere('status', 'occupied')
+                                                   ->orWhere('status', 'advance')
+                                                   ->orWhere('status', 'temp_closed')
+                                                   ->orWhere('status', 'partial')
+                                                   ->orWhere('status', 'fully paid');
+                                    });
+                        })->orWhere(function($subQuery) use ($month, $year) {
+                            // Rentals created during the specific month
+                            $subQuery->whereYear('created_at', $year)
+                                    ->whereMonth('created_at', $month);
+                        });
+                    });
                 }
                 
                 $occupiedStalls = $query->get();
@@ -649,10 +764,31 @@ public function display(Request $request)
                     })
                     ->where('status', '!=', 'unoccupied');
                 
-                // Filter by specific month and year if provided
+                // Apply month/year filter for rentals active during that period
                 if ($month && $year) {
-                    $query->whereMonth('created_at', $month)
-                          ->whereYear('created_at', $year);
+                    // Get rentals that were active during the selected month/year
+                    // Either they started before the end of the month and haven't ended,
+                    // or they were created during that month
+                    $query->where(function($q) use ($month, $year) {
+                        $monthEnd = Carbon::create($year, $month, 1)->endOfMonth();
+                        $q->where(function($subQuery) use ($month, $year, $monthEnd) {
+                            // Rentals created during or before the month and still active
+                            $subQuery->whereYear('created_at', '<=', $year)
+                                    ->whereMonth('created_at', '<=', $month)
+                                    ->where(function($activeQuery) {
+                                        $activeQuery->where('status', 'active')
+                                                   ->orWhere('status', 'occupied')
+                                                   ->orWhere('status', 'advance')
+                                                   ->orWhere('status', 'temp_closed')
+                                                   ->orWhere('status', 'partial')
+                                                   ->orWhere('status', 'fully paid');
+                                    });
+                        })->orWhere(function($subQuery) use ($month, $year) {
+                            // Rentals created during the specific month
+                            $subQuery->whereYear('created_at', $year)
+                                    ->whereMonth('created_at', $month);
+                        });
+                    });
                 }
                 
                 $occupiedStalls = $query->get();

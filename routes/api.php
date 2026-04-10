@@ -1,27 +1,32 @@
 <?php
 
 use App\Http\Controllers\AdminController;
+use App\Http\Controllers\AdminProfileController;
 use App\Http\Controllers\AnimalsController;
-
-// Controllers
+use App\Http\Controllers\Api\CategoryController;
+use App\Http\Controllers\Api\MarketProductController;
 use App\Http\Controllers\ApplicationController;
 use App\Http\Controllers\AreaController;
 use App\Http\Controllers\Auth\LoginController;
+use App\Http\Controllers\CashTicketTypeController;
 use App\Http\Controllers\CertificateController;
 use App\Http\Controllers\CustomerController;
+
 use App\Http\Controllers\DepartmentCollectionController;
 use App\Http\Controllers\InchargeCollectorController;
 use App\Http\Controllers\MainCollectorController;
 use App\Http\Controllers\MarketLayoutController;
+use App\Http\Controllers\MarketOpenSpaceController;
+use App\Http\Controllers\Api\AvailableProductsController;
 use App\Http\Controllers\MarketRegistrationController;
 use App\Http\Controllers\MeatInspectorController;
 use App\Http\Controllers\MotopoolPaymentController;
-
 use App\Http\Controllers\PaymentController;
+use App\Http\Controllers\PaymentManagementController;
 use App\Http\Controllers\PaymentMonitoringController;
 use App\Http\Controllers\PaymentReportsController;
 use App\Http\Controllers\RemittanceController;
-use App\Http\Controllers\ReportController;
+
 use App\Http\Controllers\ReportsController;
 use App\Http\Controllers\SectionController;
 use App\Http\Controllers\SlaughterPaymentController;
@@ -29,20 +34,12 @@ use App\Http\Controllers\StallController;
 use App\Http\Controllers\StallRateHistoryController;
 use App\Http\Controllers\TargetCollectionController;
 use App\Http\Controllers\TargetController;
-use App\Http\Controllers\TenantController;
+use App\Http\Controllers\VendorAnalysisController;
 use App\Http\Controllers\VendorController;
 use App\Http\Controllers\VendorManagementController;
-use App\Http\Controllers\VendorPaymentController;
 use App\Http\Controllers\VendorPaymentCalendarController;
-use App\Http\Controllers\VendorAnalysisController;
-use App\Http\Controllers\CashTicketController;
-use App\Http\Controllers\CashTicketTypeController;
-use App\Http\Controllers\DailyCollectionController;
+use App\Http\Controllers\VendorPaymentController;
 use App\Http\Controllers\WharfPaymentController;
-use App\Http\Controllers\AdminProfileController;
-
-use App\Http\Controllers\MarketOpenSpaceController;
-
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
 
@@ -75,7 +72,7 @@ Route::prefix('auth')->group(function () {
 });
 
 // 🏘️ SectionController
-Route::get('/sections', [SectionController::class, 'index']);
+Route::get('/   ', [SectionController::class, 'index']);
 Route::post('/sections', [SectionController::class, 'store']);
 Route::put('/sections/{id}', [SectionController::class, 'update']);
 Route::delete('/sections/{id}', [SectionController::class, 'destroy']);
@@ -154,6 +151,16 @@ Route::get('/market-collection-details', [PaymentController::class, 'collectionD
 Route::middleware('auth:sanctum')->get('/market-collection-summary', [PaymentController::class, 'collectionSummary']);
 Route::middleware('auth:sanctum')->get('/collector/pending-remit-notification', [InchargeCollectorController::class, 'collectorPendingRemitNotification']);
 Route::middleware('auth:sanctum')->get('/market-remittance-report/{period}', [PaymentController::class, 'marketRemittanceReport']);
+
+// Payment Management Routes
+Route::middleware('auth:sanctum')->group(function () {
+    Route::get('/payments', [PaymentManagementController::class, 'index']);
+    Route::put('/payments/{id}', [PaymentManagementController::class, 'update']);
+    Route::delete('/payments/{id}', [PaymentManagementController::class, 'destroy']);
+    Route::get('/vendors', [PaymentManagementController::class, 'getVendors']);
+    Route::get('/payment-management/stats', [PaymentManagementController::class, 'getStats']);
+    Route::get('/vendors/{vendorId}/payments', [PaymentManagementController::class, 'getVendorPayments']);
+});
 
 Route::middleware('auth:sanctum')->group(function () {
     Route::post('/market-registration/{id}/renew', [MarketRegistrationController::class, 'renew']);
@@ -247,6 +254,8 @@ Route::get('/main-collector/reports', [RemittanceController::class, 'index']);
 
 Route::get('/reports/combined', [ReportsController::class, 'DepartmentsReport']);
 Route::get('/reports/rental-report', [ReportsController::class, 'rentalReport']);
+Route::get('/reports/vendor-details', [ReportsController::class, 'vendorDetails']);
+Route::middleware('auth:sanctum')->put('/rented/{id}/update-rented-at', [ReportsController::class, 'updateRentedAt']);
 
 Route::middleware('auth:sanctum')->get('/slaughter-already-remitted', [InchargeCollectorController::class, 'alreadyRemittedToday']);
 
@@ -422,7 +431,11 @@ Route::middleware('auth:sanctum')->prefix('vendor-payments')->group(function () 
     Route::get('/history/{vendorId}', [VendorPaymentController::class, 'getPaymentHistory']);
     Route::post('/bulk/{vendorId}', [VendorPaymentController::class, 'bulkPayment']);
     Route::post('/selected-months/{vendorId}', [VendorPaymentController::class, 'processSelectedMonthsPayment']);
+    Route::post('/consume-deposit/{vendorId}', [VendorPaymentController::class, 'consumeDeposit']);
     Route::get('/market-collection-report', [VendorPaymentController::class, 'getMarketCollectionReport']);
+    
+    // Test endpoint to verify backend update
+   
 });
 
 // �💰 Payment Monitoring Routes
@@ -521,6 +534,7 @@ Route::prefix('vendor-analysis')->group(function () {
     Route::get('/vendor/{vendorId}', [VendorAnalysisController::class, 'getVendorAnalysis']);
     Route::post('/update-or-numbers', [VendorAnalysisController::class, 'updateOrNumbersForDate']);
     Route::get('/get-or-numbers', [VendorAnalysisController::class, 'getOrNumbersForDate']);
+    Route::get('/all-vendors-with-balances', [VendorAnalysisController::class, 'getAllVendorsWithBalances']);
 });
 
 // Admin Profile Routes
@@ -559,4 +573,32 @@ Route::prefix('stall-rate-history')->group(function () {
     // Initialize rate history (admin functions)
     Route::post('/initialize-all', [StallRateHistoryController::class, 'initializeAllStalls']);
     Route::post('/initialize/{stallId}', [StallRateHistoryController::class, 'initializeStall']);
+});
+
+// 🛍️ Product Management Routes
+Route::middleware('auth:sanctum')->prefix('products')->group(function () {
+    Route::get('/', [MarketProductController::class, 'index']);
+    Route::post('/', [MarketProductController::class, 'store']);
+    Route::get('/{id}', [MarketProductController::class, 'show']);
+    Route::put('/{id}', [MarketProductController::class, 'update']);
+    Route::delete('/{id}', [MarketProductController::class, 'destroy']);
+    Route::get('/category/{categoryId}', [MarketProductController::class, 'getByCategory']);
+});
+
+// 📂 Category Management Routes
+Route::middleware('auth:sanctum')->prefix('categories')->group(function () {
+    Route::get('/', [CategoryController::class, 'index']);
+    Route::post('/', [CategoryController::class, 'store']);
+    Route::get('/{id}', [CategoryController::class, 'show']);
+    Route::put('/{id}', [CategoryController::class, 'update']);
+    Route::delete('/{id}', [CategoryController::class, 'destroy']);
+});
+
+// 🏪 Public Available Products Routes (No Authentication Required)
+Route::prefix('public')->group(function () {
+    Route::get('/categories', [AvailableProductsController::class, 'getCategories']);
+    Route::get('/products', [AvailableProductsController::class, 'getAllProducts']);
+    Route::get('/products/available', [AvailableProductsController::class, 'getAvailableProducts']);
+    Route::get('/products/category/{categoryId}', [AvailableProductsController::class, 'getProductsByCategory']);
+    Route::get('/products/{id}', [AvailableProductsController::class, 'getProduct']);
 });

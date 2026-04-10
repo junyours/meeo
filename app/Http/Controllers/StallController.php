@@ -49,7 +49,7 @@ class StallController extends Controller
                 
                 $rented->save();
                 
-                \Log::info('Vendor removed from stall', [
+                Log::info('Vendor removed from stall', [
                     'stall_id' => $stallId,
                     'rented_id' => $rented->id,
                     'vendor_id' => $rented->vendor_id,
@@ -57,7 +57,7 @@ class StallController extends Controller
                     'new_status' => 'unoccupied'
                 ]);
             } else {
-                \Log::info('No active rental found for stall', [
+                Log::info('No active rental found for stall', [
                     'stall_id' => $stallId
                 ]);
             }
@@ -172,7 +172,7 @@ class StallController extends Controller
             $stall = Stalls::findOrFail($id);
             
             // Debug logging
-            \Log::info('Updating stall rent', [
+            Log::info('Updating stall rent', [
                 'stall_id' => $id,
                 'old_daily_rate' => $stall->daily_rate,
                 'new_daily_rate' => $request->daily_rate,
@@ -191,7 +191,7 @@ class StallController extends Controller
                 ($request->has('is_monthly') && $request->is_monthly != $stall->is_monthly)
             );
             
-            \Log::info('Rates changed check', ['ratesChanged' => $ratesChanged]);
+            Log::info('Rates changed check', ['ratesChanged' => $ratesChanged]);
 
             // Update stall rent rates
             $updateData = [
@@ -210,7 +210,7 @@ class StallController extends Controller
             // Create rate history record if rates changed AND effective date is provided
             $effectiveDate = $request->input('effective_date');
             if ($ratesChanged && !empty($effectiveDate)) {
-                \Log::info('Creating rate history', [
+                Log::info('Creating rate history', [
                     'stall_id' => $id,
                     'daily_rate' => $request->daily_rate,
                     'monthly_rate' => $request->monthly_rate,
@@ -226,32 +226,51 @@ class StallController extends Controller
                         $effectiveDate,
                         $request->annual_rate
                     );
-                    \Log::info('Rate history created successfully', ['rate_history_id' => $rateHistory->id]);
+                    Log::info('Rate history created successfully', ['rate_history_id' => $rateHistory->id]);
                 } catch (\Exception $e) {
-                    \Log::error('Failed to create rate history', [
+                    Log::error('Failed to create rate history', [
                         'error' => $e->getMessage(),
                         'trace' => $e->getTraceAsString()
                     ]);
                     // Don't fail the whole transaction if rate history fails
                 }
             } elseif ($ratesChanged && empty($effectiveDate)) {
-                \Log::info('Rates changed but no effective date provided, skipping rate history creation');
+                Log::info('Rates changed but no effective date provided, skipping rate history creation');
             } else {
-                \Log::info('Rates did not change, skipping history creation');
+                Log::info('Rates did not change, skipping history creation');
             }
 
             // Find and update active rented records for this stall
-            $activeRentedRecords = Rented::where('stall_id', $id)
-                ->where('status', 'occupied')
-                ->get();
-
+            // Only update if effective date is today or in the past
+            $today = now()->toDateString();
+            $effectiveDate = $request->input('effective_date', $today);
+            $shouldUpdateRentedRecords = ($effectiveDate <= $today);
+            
             $updatedRentedCount = 0;
-            foreach ($activeRentedRecords as $rented) {
-                $rented->update([
-                    'daily_rent'   => $request->daily_rate,
-                    'monthly_rent' => $request->monthly_rate,
+            if ($shouldUpdateRentedRecords) {
+                $activeRentedRecords = Rented::where('stall_id', $id)
+                    ->where('status', 'occupied')
+                    ->get();
+
+                foreach ($activeRentedRecords as $rented) {
+                    $rented->update([
+                        'daily_rent'   => $request->daily_rate,
+                        'monthly_rent' => $request->monthly_rate,
+                    ]);
+                    $updatedRentedCount++;
+                }
+                
+                Log::info('Updated rented records with new rates', [
+                    'stall_id' => $id,
+                    'effective_date' => $effectiveDate,
+                    'updated_count' => $updatedRentedCount
                 ]);
-                $updatedRentedCount++;
+            } else {
+                Log::info('Skipping rented record update due to future effective date', [
+                    'stall_id' => $id,
+                    'effective_date' => $effectiveDate,
+                    'today' => $today
+                ]);
             }
 
             return response()->json([
@@ -430,7 +449,7 @@ public function stallsForCollector(Request $request)
         // Flag for pending confirmation
         $rented->is_pending_confirmation = $lastPayment ? $lastPayment->status === 'pending_confirmation' : false;
 
-        // Flag for paid today
+        // Flag for paid today - check if payment exists for today
         $rented->is_paid_today = $lastPayment 
             ? ($lastPayment->status === 'collected' && Carbon::parse($lastPayment->payment_date)->isSameDay($today))
             : false;
@@ -443,7 +462,8 @@ public function stallsForCollector(Request $request)
         $rented->is_advance_active = false;
         $rented->advance_days = 0;
 
-        $rentedStart = Carbon::parse($rented->rented_date ?? $rented->created_at)->startOfDay();
+        // Use created_at as the rental start date for missed days calculation
+        $rentalStart = Carbon::parse($rented->created_at)->startOfDay();
 
         // First day handling
         if ($today->equalTo($rentedStart)) {
@@ -490,8 +510,50 @@ public function stallsForCollector(Request $request)
             $rented->missedDaysCount = 0;
             $rented->missedAmount = 0;
             $rented->is_collectable = false;
+        } elseif ($stall->is_monthly) {
+            // Monthly stall: calculate missed months
+            $missedMonths = 0;
+            $expectedPaymentMonth = $rentalStart->copy();
+            
+            // Count each month from rental start until yesterday that doesn't have a payment
+            while ($expectedPaymentMonth->lt($today)) {
+                $hasPaymentForMonth = $rented->payments()
+                    ->whereYear('payment_date', $expectedPaymentMonth->year)
+                    ->whereMonth('payment_date', $expectedPaymentMonth->month)
+                    ->whereIn('status', ['collected', 'remitted'])
+                    ->exists();
+                
+                if (!$hasPaymentForMonth) {
+                    $missedMonths++;
+                }
+                
+                $expectedPaymentMonth->addMonth();
+            }
+            
+            $rented->missedDaysCount = $missedMonths; // Store months in missed_days field
+            $rented->missedAmount = $missedMonths * ($rented->monthly_rent ?: $rented->daily_rent * 30);
+            $rented->is_collectable = $missedMonths > 0;
         } elseif ($paymentType === 'daily') {
-            $missedDays = $today->greaterThan($baseDate) ? $today->copy()->subDay()->diffInDays($baseDate) : 0;
+            // Calculate missed days from rental start date
+            // If rental started on Jan 1 and today is Jan 2 with no payment for Jan 1, missed days = 1
+            $expectedPaymentDate = $rentalStart->copy();
+            $missedDays = 0;
+            
+            // Count each day from rental start until yesterday that doesn't have a payment
+            while ($expectedPaymentDate->lt($today)) {
+                $hasPaymentForDay = $rented->payments()
+                    ->where('payment_type', 'daily')
+                    ->whereDate('payment_date', $expectedPaymentDate)
+                    ->whereIn('status', ['collected', 'remitted'])
+                    ->exists();
+                
+                if (!$hasPaymentForDay) {
+                    $missedDays++;
+                }
+                
+                $expectedPaymentDate->addDay();
+            }
+            
             $rented->missedDaysCount = $missedDays;
             $rented->missedAmount = $missedDays * $rented->daily_rent;
             $rented->is_collectable = $missedDays > 0;
@@ -501,8 +563,25 @@ public function stallsForCollector(Request $request)
                 $rented->missedAmount = 0;
                 $rented->is_collectable = false;
             } else {
-                $nextDueDate = $baseDate->copy()->addDay();
-                $missedDays = $today->greaterThan($nextDueDate) ? $today->copy()->subDay()->diffInDays($nextDueDate) : 0;
+                // For monthly payments, calculate from the day after rental start
+                $nextDueDate = $rentalStart->copy()->addDay();
+                $missedDays = 0;
+                
+                // Count missed days from due date until yesterday
+                $currentDate = $nextDueDate->copy();
+                while ($currentDate->lt($today)) {
+                    $hasPaymentForDay = $rented->payments()
+                        ->whereDate('payment_date', $currentDate)
+                        ->whereIn('status', ['collected', 'remitted'])
+                        ->exists();
+                    
+                    if (!$hasPaymentForDay) {
+                        $missedDays++;
+                    }
+                    
+                    $currentDate->addDay();
+                }
+                
                 $rented->missedDaysCount = $missedDays;
                 $rented->missedAmount = $missedDays * $rented->daily_rent;
                 $rented->is_collectable = $missedDays > 0;
@@ -521,11 +600,24 @@ public function stallsForCollector(Request $request)
                 $rented->status_label = 'Advance Active';
                 $rented->status_color = 'blue';
             } elseif ($rented->is_collectable) {
-                $rented->status_label = 'Collectable';
-                $rented->status_color = 'orange';
+                // Check if missed days/months >= 4 for temp_closed color
+                if ($rented->missedDaysCount >= 4) {
+                    $rented->status_label = 'Temp Closed';
+                    $rented->status_color = '#ff4d00ff';
+                } else {
+                    $rented->status_label = 'Collectable';
+                    $rented->status_color = 'orange';
+                }
             } elseif ($rented->missedDaysCount > 0) {
-                $rented->status_label = 'Missed';
-                $rented->status_color = 'red';
+                // Check if missed days/months >= 4 for temp_closed color
+                if ($rented->missedDaysCount >= 4) {
+                    $rented->status_label = 'Temp Closed';
+                    $rented->status_color = '#ff4d00ff';
+                } else {
+                    // Red color for 1-3 missed days/months
+                    $rented->status_label = 'Missed';
+                    $rented->status_color = '#eb1414ff';
+                }
             } else {
                 $rented->status_label = 'No Payment';
                 $rented->status_color = 'gray';
@@ -604,7 +696,10 @@ public function getTenant($id)
     $nextDueDate      = null;
     $missedDays       = 0;
     $remainingBalance = null;
-    $today            = now();
+    $today            = now()->startOfDay();
+
+    // Use created_at as rental start date for missed days calculation
+    $rentalStart = $stall->currentRental->created_at->copy()->startOfDay();
 
     if ($latestPayment) {
         if ($latestPayment->payment_type === 'advance') {
@@ -618,52 +713,105 @@ public function getTenant($id)
 
         $amount = $latestPayment->amount;
 
-        // Original due date based on payment
-        $dueDate = $latestPayment->payment_date->copy()->addDays($advanceDays ?? 1);
-
-        // Compute missed days based on original due date
-        if ($today->gt($dueDate)) { 
-            $missedDays = $today->diffInDays($dueDate);
+        // Calculate missed days based on payment history
+        if ($stall->is_monthly) {
+            // Monthly stall: calculate missed months
+            $missedMonths = 0;
+            $expectedPaymentMonth = $rentalStart->copy();
+            
+            while ($expectedPaymentMonth->lt($today)) {
+                $hasPaymentForMonth = $stall->currentRental->payments()
+                    ->whereYear('payment_date', $expectedPaymentMonth->year)
+                    ->whereMonth('payment_date', $expectedPaymentMonth->month)
+                    ->whereIn('status', ['collected', 'remitted'])
+                    ->exists();
+                
+                if (!$hasPaymentForMonth) {
+                    $missedMonths++;
+                }
+                
+                $expectedPaymentMonth->addMonth();
+            }
+            
+            $missedDays = $missedMonths; // Store months in missed_days field
+        } elseif ($paymentType === 'Daily') {
+            // Count unpaid days from rental start
+            $expectedPaymentDate = $rentalStart->copy();
+            $calculatedMissedDays = 0;
+            
+            while ($expectedPaymentDate->lt($today)) {
+                $hasPaymentForDay = $stall->currentRental->payments()
+                    ->where('payment_type', 'daily')
+                    ->whereDate('payment_date', $expectedPaymentDate)
+                    ->whereIn('status', ['collected', 'remitted'])
+                    ->exists();
+                
+                if (!$hasPaymentForDay) {
+                    $calculatedMissedDays++;
+                }
+                
+                $expectedPaymentDate->addDay();
+            }
+            
+            $missedDays = $calculatedMissedDays;
+        } else {
+            // For advance or other payment types
+            $dueDate = $latestPayment->payment_date->copy()->addDays($advanceDays ?? 1);
+            $missedDays = $today->gt($dueDate) ? $today->diffInDays($dueDate) : 0;
         }
 
-        // 🔹 Adjust the next due date:
-        // if original due date is today or in the past -> set to tomorrow
-        if ($dueDate->lte($today)) {
-            $nextDueDate = $today->copy()->addDay(); // tomorrow
+        // Set next due date to tomorrow if there are missed days or if paid today
+        if ($missedDays > 0 || Carbon::parse($latestPayment->payment_date)->isSameDay($today)) {
+            $nextDueDate = $today->copy()->addDay();
         } else {
-            $nextDueDate = $dueDate; // still in the future
+            $nextDueDate = $latestPayment->payment_date->copy()->addDays($advanceDays ?? 1);
         }
 
     } else {
-        // No payments yet → base on rental start
-        $startDate  = $stall->currentRental->created_at->copy();
-        $originalDue = $startDate->copy()->addDay();
-
-        if ($today->gt($startDate)) {
-            $missedDays = $today->diffInDays($startDate);
-        }
-
-        // 🔹 Same rule: if due already passed or today, set to tomorrow
-        if ($originalDue->lte($today)) {
-            $nextDueDate = $today->copy()->addDay();
+        // No payments yet - calculate missed days/months from rental start
+        if ($stall->is_monthly) {
+            // Monthly stall: calculate missed months
+            $missedMonths = 0;
+            $expectedPaymentMonth = $rentalStart->copy();
+            
+            while ($expectedPaymentMonth->lt($today)) {
+                $missedMonths++;
+                $expectedPaymentMonth->addMonth();
+            }
+            
+            $missedDays = $missedMonths;
         } else {
-            $nextDueDate = $originalDue;
+            // Daily stall: calculate missed days
+            $calculatedMissedDays = 0;
+            $expectedPaymentDate = $rentalStart->copy();
+            
+            while ($expectedPaymentDate->lt($today)) {
+                $calculatedMissedDays++;
+                $expectedPaymentDate->addDay();
+            }
+            
+            $missedDays = $calculatedMissedDays;
         }
+        $nextDueDate = $today->copy()->addDay();
     }
 
-    // If rental is temp_closed and a stored missed_days exists, prefer it so partial payments
-    // reflect the remaining days instead of always recomputing from dates.
-    if ($stall->currentRental->status === 'temp_closed' && $stall->currentRental->missed_days !== null) {
-        $missedDays = (int) $stall->currentRental->missed_days;
-    }
+    // Don't override with stored missed_days - use calculated value like AreaController
+    // This ensures consistency between SectionManager and individual stall views
 
-    // Use stored remaining_balance when present, otherwise compute as daily_rent * missedDays
+    // Use stored remaining_balance when present, otherwise compute as rent * missedDays/Months
     if ($stall->currentRental) {
         if ($stall->currentRental->remaining_balance !== null && $stall->currentRental->remaining_balance > 0) {
             $remainingBalance = (float) $stall->currentRental->remaining_balance;
         } elseif ($missedDays > 0) {
-            $dailyRent = (float) ($stall->currentRental->daily_rent ?? 0);
-            $totalMissedAmount = $missedDays * $dailyRent;
+            if ($stall->is_monthly) {
+                // Monthly stall: use monthly rent
+                $monthlyRent = (float) ($stall->currentRental->monthly_rent ?? $computedMonthlyRate ?? 0);
+                $totalMissedAmount = $missedDays * $monthlyRent;
+            } else {
+                // Daily stall: use daily rent
+                $dailyRent = (float) ($stall->currentRental->daily_rent ?? 0);
+                $totalMissedAmount = $missedDays * $dailyRent;
+            }
 
             if ($totalMissedAmount > 0) {
                 $remainingBalance = $totalMissedAmount;
@@ -709,16 +857,43 @@ public function getTenantHistory($id)
         ->orderByDesc('created_at')
         ->get();
 
-    $today = now();
+    // Debug log to see what we're working with
+    Log::info('Getting tenant history for stall', [
+        'stall_id' => $id,
+        'total_rentals' => $history->count(),
+        'rentals' => $history->map(function($r) {
+            return [
+                'id' => $r->id,
+                'vendor_id' => $r->vendor_id,
+                'vendor_name' => $r->vendor ? $r->vendor->first_name : 'Unknown',
+                'status' => $r->status,
+                'created_at' => $r->created_at->toDateTimeString(),
+                'updated_at' => $r->updated_at->toDateTimeString(),
+            ];
+        })
+    ]);
+
+    $today = now()->startOfDay();
 
     $formatted = $history->map(function ($r) use ($today) {
         // 🔹 Date range for this rental
         $startDate = $r->created_at->format('F d, Y');
+        
+        // Debug each rental record
+        Log::info('Processing rental record', [
+            'rental_id' => $r->id,
+            'vendor_name' => $r->vendor ? $r->vendor->first_name : 'Unknown',
+            'status' => $r->status,
+            'updated_at' => $r->updated_at ? $r->updated_at->toDateTimeString() : null,
+            'is_unoccupied' => $r->status === 'unoccupied',
+            'has_updated_at' => !empty($r->updated_at)
+        ]);
+        
         $endDate = ($r->status === 'unoccupied' && $r->updated_at)
             ? $r->updated_at->format('F d, Y')
             : 'Present';
 
-        // 🔹 Compute missed days & related info using SAME LOGIC as 
+        // 🔹 Compute missed days & related info using SAME LOGIC as stallsForCollector
         $latestPayment = $r->payments()->latest('payment_date')->first();
 
         $paymentType  = 'N/A';
@@ -726,6 +901,9 @@ public function getTenantHistory($id)
         $amount       = null;
         $nextDueDate  = null;
         $missedDays   = 0;
+
+        // Use created_at as rental start date for missed days calculation
+        $rentalStart = $r->created_at->copy()->startOfDay();
 
         if ($latestPayment) {
             if ($latestPayment->payment_type === 'advance') {
@@ -738,19 +916,48 @@ public function getTenantHistory($id)
             }
 
             $amount      = $latestPayment->amount;
+
+            // Calculate missed days based on payment history
+            if ($paymentType === 'Daily') {
+                // Count unpaid days from rental start
+                $expectedPaymentDate = $rentalStart->copy();
+                $calculatedMissedDays = 0;
+                
+                while ($expectedPaymentDate->lt($today)) {
+                    $hasPaymentForDay = $r->payments()
+                        ->where('payment_type', 'daily')
+                        ->whereDate('payment_date', $expectedPaymentDate)
+                        ->whereIn('status', ['collected', 'remitted'])
+                        ->exists();
+                    
+                    if (!$hasPaymentForDay) {
+                        $calculatedMissedDays++;
+                    }
+                    
+                    $expectedPaymentDate->addDay();
+                }
+                
+                $missedDays = $calculatedMissedDays;
+            } else {
+                // For advance or other payment types
+                $dueDate = $latestPayment->payment_date->copy()->addDays($advanceDays ?? 1);
+                $missedDays = $today->gt($dueDate) ? $today->diffInDays($dueDate) : 0;
+            }
+            
             $nextDueDate = $latestPayment->payment_date->copy()->addDays($advanceDays ?? 1);
 
-            if ($today->gt($nextDueDate)) {
-                $missedDays = $today->diffInDays($nextDueDate);
-            }
         } else {
             // If no payment for this rental, base on rental start
-            $start = $r->created_at->copy();
-            $nextDueDate = $start->copy()->addDay();
-
-            if ($today->gt($start)) {
-                $missedDays = $today->diffInDays($start);
+            $calculatedMissedDays = 0;
+            $expectedPaymentDate = $rentalStart->copy();
+            
+            while ($expectedPaymentDate->lt($today)) {
+                $calculatedMissedDays++;
+                $expectedPaymentDate->addDay();
             }
+            
+            $missedDays = $calculatedMissedDays;
+            $nextDueDate = $rentalStart->copy()->addDay();
         }
 
         // 🔹 If rental is temp_closed and a stored missed_days exists, prefer it so partial payments
@@ -782,6 +989,59 @@ public function getTenantHistory($id)
     return response()->json([
         'stall_id' => $stall->id,
         'history'  => $formatted,
+    ]);
+}
+
+/**
+ * Process pending rate updates when they become effective
+ * This method should be called periodically (e.g., daily cron job)
+ */
+public function processPendingRateUpdates()
+{
+    $today = now()->toDateString();
+    $processedCount = 0;
+    
+    Log::info('Processing pending rate updates', ['date' => $today]);
+    
+    // Find all rate history records that become effective today
+    $effectiveRateHistories = StallRateHistory::where('effective_from', $today)
+        ->get();
+        
+    foreach ($effectiveRateHistories as $rateHistory) {
+        $stallId = $rateHistory->stall_id;
+        
+        // Find active rented records for this stall
+        $activeRentedRecords = Rented::where('stall_id', $stallId)
+            ->where('status', 'occupied')
+            ->get();
+            
+        foreach ($activeRentedRecords as $rented) {
+            $rented->update([
+                'daily_rent'   => $rateHistory->daily_rate,
+                'monthly_rent' => $rateHistory->monthly_rate,
+            ]);
+            $processedCount++;
+        }
+        
+        Log::info('Processed rate history', [
+            'rate_history_id' => $rateHistory->id,
+            'stall_id' => $stallId,
+            'daily_rate' => $rateHistory->daily_rate,
+            'monthly_rate' => $rateHistory->monthly_rate,
+            'updated_rented_records' => count($activeRentedRecords)
+        ]);
+    }
+    
+    Log::info('Completed processing pending rate updates', [
+        'processed_histories' => $effectiveRateHistories->count(),
+        'updated_rented_records' => $processedCount
+    ]);
+    
+    return response()->json([
+        'success' => true,
+        'message' => "Processed {$effectiveRateHistories->count()} rate histories, updated {$processedCount} rented records.",
+        'processed_histories' => $effectiveRateHistories->count(),
+        'updated_rented_records' => $processedCount
     ]);
 }
 

@@ -578,6 +578,5 @@ public function stats(Request $request)
 
 
 
-
 }
 
