@@ -250,7 +250,8 @@ class EventActivityController extends Controller
             'location' => 'nullable|string|max:255',
             'daily_rate' => 'required|numeric|min:0',
             'row_count' => 'nullable|integer|min:1|max:20',
-            'column_count' => 'nullable|integer|min:1|max:20',
+            'column_count' => 'nullable|array',
+            'column_count.*' => 'integer|min:1|max:20',
         ]);
 
         if ($validator->fails()) {
@@ -265,7 +266,7 @@ class EventActivityController extends Controller
             $stallCount = $request->stall_count;
             $isAmbulant = $request->is_ambulant;
             $rowCount = $request->row_count ?? 1;
-            $columnCount = $request->column_count ?? 1;
+            $columnCounts = $request->column_count ?? [1];
             
             $totalDays = $activity->getTotalDaysAttribute();
             $totalRent = $request->daily_rate * $totalDays;
@@ -333,27 +334,33 @@ class EventActivityController extends Controller
                     'final_stall_number' => $stallNumber
                 ]);
                 
-                for ($i = 1; $i <= $stallCount; $i++) {
-                    $row = ceil($i / $columnCount);
-                    $col = (($i - 1) % $columnCount) + 1;
-                    
-                    $stall = EventStall::create([
-                        'activity_id' => $activityId,
-                        'stall_number' => (string)$stallNumber,
-                        'is_ambulant' => false,
-                        'stall_name' => $request->stall_name,
-                        'description' => $request->description,
-                        'size' => $request->size,
-                        'location' => $request->location,
-                        'daily_rate' => $request->daily_rate,
-                        'total_days' => $totalDays,
-                        'total_rent' => $totalRent,
-                        'status' => 'available',
-                        'row_position' => $row,
-                        'column_position' => $col,
-                    ]);
-                    $createdStalls[] = $stall;
-                    $stallNumber++;
+                $currentStallIndex = 0;
+                $currentRow = 1;
+                
+                foreach ($columnCounts as $columnCount) {
+                    for ($col = 1; $col <= $columnCount; $col++) {
+                        if ($currentStallIndex >= $stallCount) break;
+                        
+                        $stall = EventStall::create([
+                            'activity_id' => $activityId,
+                            'stall_number' => (string)$stallNumber,
+                            'is_ambulant' => false,
+                            'stall_name' => $request->stall_name,
+                            'description' => $request->description,
+                            'size' => $request->size,
+                            'location' => $request->location,
+                            'daily_rate' => $request->daily_rate,
+                            'total_days' => $totalDays,
+                            'total_rent' => $totalRent,
+                            'status' => 'available',
+                            'row_position' => $currentRow,
+                            'column_position' => $col,
+                        ]);
+                        $createdStalls[] = $stall;
+                        $stallNumber++;
+                        $currentStallIndex++;
+                    }
+                    $currentRow++;
                 }
             }
 
