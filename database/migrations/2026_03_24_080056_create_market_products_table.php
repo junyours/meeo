@@ -11,19 +11,21 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('market_products', function (Blueprint $table) {
-            $table->id();
-            $table->string('name');
-            $table->text('description')->nullable();
-            $table->decimal('price', 10, 2);
-            $table->string('unit'); // kg, pc, dozen, bunch, etc.
-            $table->string('image')->nullable();
-            $table->boolean('available')->default(true);
-            $table->unsignedBigInteger('category_id');
-            $table->timestamps();
+        if (!Schema::hasTable('market_products')) {
+            Schema::create('market_products', function (Blueprint $table) {
+                $table->id();
+                $table->string('name');
+                $table->text('description')->nullable();
+                $table->decimal('price', 10, 2);
+                $table->string('unit'); // kg, pc, dozen, bunch, etc.
+                $table->string('image')->nullable();
+                $table->boolean('available')->default(true);
+                $table->unsignedBigInteger('category_id');
+                $table->timestamps();
 
-            $table->foreign('category_id')->references('id')->on('categories')->onDelete('cascade');
-        });
+                $table->foreign('category_id')->references('id')->on('categories')->onDelete('cascade');
+            });
+        }
     }
 
     /**

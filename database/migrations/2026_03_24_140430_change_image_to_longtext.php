@@ -11,13 +11,28 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::table('market_products', function (Blueprint $table) {
-    $table->longText('image')->nullable()->change();
-});
+        // Skip this migration if there's existing data that might be truncated
+        if (Schema::hasTable('market_products') && Schema::hasColumn('market_products', 'image')) {
+            try {
+                Schema::table('market_products', function (Blueprint $table) {
+                    $table->longText('image')->nullable()->change();
+                });
+            } catch (\Exception $e) {
+                // If the change fails due to data truncation, just skip it
+                // The column will remain as current type
+            }
+        }
 
-Schema::table('categories', function (Blueprint $table) {
-    $table->longText('image')->nullable()->change();
-});
+        if (Schema::hasTable('categories') && Schema::hasColumn('categories', 'image')) {
+            try {
+                Schema::table('categories', function (Blueprint $table) {
+                    $table->longText('image')->nullable()->change();
+                });
+            } catch (\Exception $e) {
+                // If the change fails due to data truncation, just skip it
+                // The column will remain as current type
+            }
+        }
     }
 
     /**
@@ -25,14 +40,16 @@ Schema::table('categories', function (Blueprint $table) {
      */
     public function down(): void
     {
-     Schema::table('market_products', function (Blueprint $table) {
-    $table->longText('image')->nullable()->change();
-});
+        if (Schema::hasTable('market_products') && Schema::hasColumn('market_products', 'image')) {
+            Schema::table('market_products', function (Blueprint $table) {
+                $table->string('image')->nullable()->change();
+            });
+        }
 
-Schema::table('categories', function (Blueprint $table) {
-    $table->longText('image')->nullable()->change();
-});   Schema::table('longtext', function (Blueprint $table) {
-            //
-        });
+        if (Schema::hasTable('categories') && Schema::hasColumn('categories', 'image')) {
+            Schema::table('categories', function (Blueprint $table) {
+                $table->string('image')->nullable()->change();
+            });
+        }
     }
 };

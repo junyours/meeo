@@ -11,15 +11,17 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::create('categories', function (Blueprint $table) {
-            $table->id();
-            $table->string('name');
-            $table->text('description')->nullable();
-            $table->string('color')->default('#1890ff');
-            $table->string('icon')->default('FaShoppingBag');
-            $table->string('image')->nullable();
-            $table->timestamps();
-        });
+        if (!Schema::hasTable('categories')) {
+            Schema::create('categories', function (Blueprint $table) {
+                $table->id();
+                $table->string('name');
+                $table->text('description')->nullable();
+                $table->string('color')->default('#1890ff');
+                $table->string('icon')->default('FaShoppingBag');
+                $table->string('image')->nullable();
+                $table->timestamps();
+            });
+        }
     }
 
     /**

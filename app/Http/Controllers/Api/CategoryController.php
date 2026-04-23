@@ -84,14 +84,6 @@ class CategoryController extends Controller
     {
         $category = Category::findOrFail($id);
         
-        \Log::info('Category update request received', [
-            'category_id' => $category->id,
-            'request_data' => $request->all(),
-            'has_file' => $request->hasFile('image'),
-            'has_existing_image' => $request->has('existing_image'),
-            'existing_image_value' => $request->input('existing_image'),
-            'current_category_image' => $category->image
-        ]);
 
         $request->validate([
             'name' => 'required|string|max:255',
@@ -105,29 +97,19 @@ class CategoryController extends Controller
         $data = $request->except(['image', 'existing_image']);
         
         if ($request->hasFile('image')) {
-            \Log::info('Processing new image upload');
-            
             $image = $request->file('image');
             $imageData = file_get_contents($image->getPathname());
             $mimeType = $image->getMimeType();
             $base64Image = 'data:' . $mimeType . ';base64,' . base64_encode($imageData);
             $data['image'] = $base64Image;
-            
-            \Log::info('New image stored as base64', ['mimeType' => $mimeType]);
         } elseif ($request->has('existing_image')) {
             // Keep existing image
             $data['image'] = $request->existing_image;
-            \Log::info('Keeping existing image', ['url' => $data['image']]);
         } else {
-            \Log::info('No image provided, image will be removed');
             $data['image'] = null;
         }
 
-        \Log::info('Final data for update', ['data' => $data]);
-        
         $category->update($data);
-        
-        \Log::info('Category updated successfully', ['updated_category' => $category->fresh()]);
         
         return response()->json($category);
     }
@@ -135,9 +117,10 @@ class CategoryController extends Controller
     /**
      * Remove the specified resource from storage.
      */
-    public function destroy(Category $category)
+    public function destroy($id)
     {
+        $category = Category::findOrFail($id);
         $category->delete();
-        return response()->json(null, 204);
+        return response()->json(['message' => 'Category deleted successfully'], 200);
     }
 }

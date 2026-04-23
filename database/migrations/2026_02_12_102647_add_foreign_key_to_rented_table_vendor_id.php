@@ -12,10 +12,12 @@ return new class extends Migration
     public function up(): void
     {
         Schema::table('rented', function (Blueprint $table) {
-             $table->foreign('vendor_id')
-                  ->references('id')
-                  ->on('vendor_details')
-                  ->onDelete('cascade');
+            if (Schema::hasColumn('rented', 'vendor_id')) {
+                $table->foreign('vendor_id')
+                      ->references('id')
+                      ->on('vendor_details')
+                      ->onDelete('cascade');
+            }
         });
     }
 

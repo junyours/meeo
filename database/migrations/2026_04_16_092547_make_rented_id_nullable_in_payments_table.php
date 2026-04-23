@@ -11,13 +11,9 @@ return new class extends Migration
      */
     public function up(): void
     {
-        if (Schema::hasTable('cash_tickets')) {
-            Schema::table('cash_tickets', function (Blueprint $table) {
-                if (Schema::hasColumn('cash_tickets', 'payment_date')) {
-                    $table->dropColumn('payment_date');
-                }
-            });
-        }
+        Schema::table('payments', function (Blueprint $table) {
+            $table->unsignedBigInteger('rented_id')->nullable()->change();
+        });
     }
 
     /**
@@ -25,6 +21,8 @@ return new class extends Migration
      */
     public function down(): void
     {
-        //
+        Schema::table('payments', function (Blueprint $table) {
+            $table->unsignedBigInteger('rented_id')->nullable(false)->change();
+        });
     }
 };

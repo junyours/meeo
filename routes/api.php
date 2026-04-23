@@ -1,8 +1,10 @@
 <?php
 
+use App\Http\Controllers\ActivitySalesReportController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminProfileController;
 use App\Http\Controllers\AnimalsController;
+use App\Http\Controllers\Api\AvailableProductsController;
 use App\Http\Controllers\Api\CategoryController;
 use App\Http\Controllers\Api\MarketProductController;
 use App\Http\Controllers\ApplicationController;
@@ -11,13 +13,16 @@ use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\CashTicketTypeController;
 use App\Http\Controllers\CertificateController;
 use App\Http\Controllers\CustomerController;
-
 use App\Http\Controllers\DepartmentCollectionController;
+use App\Http\Controllers\EventActivityController;
+use App\Http\Controllers\EventPaymentController;
+use App\Http\Controllers\EventSalesController;
+use App\Http\Controllers\EventStallController;
+use App\Http\Controllers\EventVendorController;
 use App\Http\Controllers\InchargeCollectorController;
 use App\Http\Controllers\MainCollectorController;
 use App\Http\Controllers\MarketLayoutController;
 use App\Http\Controllers\MarketOpenSpaceController;
-use App\Http\Controllers\Api\AvailableProductsController;
 use App\Http\Controllers\MarketRegistrationController;
 use App\Http\Controllers\MeatInspectorController;
 use App\Http\Controllers\MotopoolPaymentController;
@@ -26,7 +31,6 @@ use App\Http\Controllers\PaymentManagementController;
 use App\Http\Controllers\PaymentMonitoringController;
 use App\Http\Controllers\PaymentReportsController;
 use App\Http\Controllers\RemittanceController;
-
 use App\Http\Controllers\ReportsController;
 use App\Http\Controllers\SectionController;
 use App\Http\Controllers\SlaughterPaymentController;
@@ -541,7 +545,7 @@ Route::prefix('vendor-analysis')->group(function () {
 Route::middleware('auth:sanctum')->prefix('admin')->group(function () {
     Route::get('/profile', [AdminProfileController::class, 'getProfile']);
     Route::post('/send-otp', [AdminProfileController::class, 'sendOTP']);
-    Route::post('/verify-otp', [AdminProfileController::class, 'verifyOTP']);
+    Route::post('/verify-otp', [AdminProfileController::class, 'verifyOTP']);   
     Route::put('/profile', [AdminProfileController::class, 'updateProfile']);
     Route::get('/activity-log', [AdminProfileController::class, 'getActivityLog']);
     
@@ -601,4 +605,72 @@ Route::prefix('public')->group(function () {
     Route::get('/products/available', [AvailableProductsController::class, 'getAvailableProducts']);
     Route::get('/products/category/{categoryId}', [AvailableProductsController::class, 'getProductsByCategory']);
     Route::get('/products/{id}', [AvailableProductsController::class, 'getProduct']);
+});
+
+// 🎉 Event Management Routes
+Route::middleware('auth:sanctum')->prefix('event-activities')->group(function () {
+    Route::get('/', [EventActivityController::class, 'index']);
+    Route::post('/', [EventActivityController::class, 'store']);
+    Route::get('/active', [EventActivityController::class, 'getActiveActivities']);
+    Route::post('/{activityId}/bulk-create-stalls', [EventActivityController::class, 'bulkCreateStalls']);
+    Route::get('/{id}', [EventActivityController::class, 'show']);
+    Route::put('/{id}', [EventActivityController::class, 'update']);
+    Route::delete('/{id}', [EventActivityController::class, 'destroy']);
+    Route::get('/{id}/stats', [EventActivityController::class, 'getActivityStats']);
+});
+
+Route::middleware('auth:sanctum')->prefix('event-stalls')->group(function () {
+    Route::get('/', [EventStallController::class, 'index']);
+    Route::post('/', [EventStallController::class, 'store']);
+    Route::get('/{id}', [EventStallController::class, 'show']);
+    Route::put('/{id}', [EventStallController::class, 'update']);
+    Route::delete('/{id}', [EventStallController::class, 'destroy']);
+    Route::post('/{id}/assign-vendor', [EventStallController::class, 'assignVendor']);
+    Route::post('/{id}/release', [EventStallController::class, 'releaseStall']);
+    Route::get('/available/{activityId}', [EventStallController::class, 'getAvailableStalls']);
+});
+
+Route::middleware('auth:sanctum')->prefix('event-payments')->group(function () {
+    Route::get('/', [EventPaymentController::class, 'index']);
+    Route::post('/', [EventPaymentController::class, 'store']);
+    Route::get('/{id}', [EventPaymentController::class, 'show']);
+    Route::put('/{id}', [EventPaymentController::class, 'update']);
+    Route::delete('/{id}', [EventPaymentController::class, 'destroy']);
+    Route::get('/activity/{activityId}', [EventPaymentController::class, 'getActivityPayments']);
+    Route::get('/stall/{stallId}', [EventPaymentController::class, 'getStallPayments']);
+    Route::get('/vendor/{vendorId}', [EventPaymentController::class, 'getVendorPayments']);
+    Route::get('/summary', [EventPaymentController::class, 'getPaymentSummary']);
+    Route::get('/vendors/{activityId}', [EventPaymentController::class, 'getVendorsByActivity']);
+    Route::get('/stalls/{activityId}/{vendorId}', [EventPaymentController::class, 'getStallsByVendorAndActivity']);
+});
+
+Route::middleware('auth:sanctum')->prefix('event-sales')->group(function () {
+    Route::get('/activity/{activityId}', [EventSalesController::class, 'getActivitySalesReport']);
+    Route::post('/reports', [EventSalesController::class, 'storeSalesReport']);
+    Route::get('/reports/{id}', [EventSalesController::class, 'showSalesReport']);
+    Route::put('/reports/{id}', [EventSalesController::class, 'updateSalesReport']);
+    Route::delete('/reports/{id}', [EventSalesController::class, 'destroySalesReport']);
+    Route::get('/stall/{stallId}/history', [EventSalesController::class, 'getStallSalesHistory']);
+});
+
+Route::middleware('auth:sanctum')->prefix('activity-sales-reports')->group(function () {
+    Route::get('/', [ActivitySalesReportController::class, 'index']);
+    Route::post('/', [ActivitySalesReportController::class, 'store']);
+    Route::get('/{id}', [ActivitySalesReportController::class, 'show']);
+    Route::put('/{id}', [ActivitySalesReportController::class, 'update']);
+    Route::delete('/{id}', [ActivitySalesReportController::class, 'destroy']);
+    Route::post('/{id}/verify', [ActivitySalesReportController::class, 'verify']);
+    Route::post('/{id}/unverify', [ActivitySalesReportController::class, 'unverify']);
+    Route::get('/activity/{activityId}', [ActivitySalesReportController::class, 'getActivityReport']);
+    Route::get('/stall/{stallId}/history', [ActivitySalesReportController::class, 'getStallSalesHistory']);
+});
+
+Route::middleware('auth:sanctum')->prefix('event-vendors')->group(function () {
+    Route::get('/', [EventVendorController::class, 'index']);
+    Route::post('/', [EventVendorController::class, 'store']);
+    Route::get('/{id}', [EventVendorController::class, 'show']);
+    Route::put('/{id}', [EventVendorController::class, 'update']);
+    Route::delete('/{id}', [EventVendorController::class, 'destroy']);
+    Route::patch('/{id}/status', [EventVendorController::class, 'updateStatus']);
+    Route::get('/available', [EventVendorController::class, 'getAvailableVendors']);
 });

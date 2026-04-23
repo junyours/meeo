@@ -32,7 +32,7 @@ class MarketOpenSpaceController extends Controller
             }
 
             // Get all payments with relationships
-            $payments = Payments::with(['rented.stall.section.area', 'vendor'])
+            $payments = Payments::with(['rented.stall.section.area', 'vendor', 'eventVendor', 'stall'])
                 ->whereBetween('payment_date', [$startDate, $endDate])
                 ->whereIn('status', ['paid', 'collected'])
                 ->orderBy('payment_date', 'desc')
@@ -123,21 +123,17 @@ class MarketOpenSpaceController extends Controller
                     return [
                         'id' => $firstPayment->id,
                         'payment_date' => $firstPayment->payment_date->format('Y-m-d'),
-                        'vendor_name' => $firstPayment->vendor ? $firstPayment->vendor->first_name . ' ' . $firstPayment->vendor->last_name : 'Unknown',
+                        'vendor_name' => $this->getVendorName($firstPayment),
                         'vendor_id' => $firstPayment->vendor_id,
                         'stall_info' => $group->map(function ($payment) {
-                            return [
-                                'stall_number' => $payment->rented?->stall?->stall_number ?? 'N/A',
-                                'section_name' => $payment->rented?->stall?->section?->name ?? 'N/A',
-                                'area_name' => $payment->rented?->stall?->section?->area?->name ?? 'N/A',
-                                'payment_id' => $payment->id,
-                            ];
+                            return $this->getStallInfo($payment);
                         })->toArray(),
                         'payment_types' => $group->pluck('payment_type')->unique()->values()->toArray(),
                         'total_amount' => $group->sum('amount'),
                         'payment_count' => $group->count(),
                         'statuses' => $group->pluck('status')->unique()->values()->toArray(),
                         'all_payments' => $group->map(function ($payment) {
+                            $stallInfo = $this->getStallInfo($payment);
                             return [
                                 'id' => $payment->id,
                                 'payment_type' => $payment->payment_type,
@@ -146,9 +142,9 @@ class MarketOpenSpaceController extends Controller
                                 'missed_days' => $payment->missed_days,
                                 'advance_days' => $payment->advance_days,
                                 'rented_id' => $payment->rented_id,
-                                'stall_number' => $payment->rented?->stall?->stall_number ?? 'N/A',
-                                'section_name' => $payment->rented?->stall?->section?->name ?? 'N/A',
-                                'area_name' => $payment->rented?->stall?->section?->area?->name ?? 'N/A',
+                                'stall_number' => $stallInfo['stall_number'],
+                                'section_name' => $stallInfo['section_name'],
+                                'area_name' => $stallInfo['area_name'],
                             ];
                         })->toArray(),
                     ];
@@ -166,21 +162,17 @@ class MarketOpenSpaceController extends Controller
                     return [
                         'id' => $firstPayment->id,
                         'payment_date' => $firstPayment->payment_date->format('Y-m-d'),
-                        'vendor_name' => $firstPayment->vendor ? $firstPayment->vendor->first_name . ' ' . $firstPayment->vendor->last_name : 'Unknown',
+                        'vendor_name' => $this->getVendorName($firstPayment),
                         'vendor_id' => $firstPayment->vendor_id,
                         'stall_info' => $group->map(function ($payment) {
-                            return [
-                                'stall_number' => $payment->rented?->stall?->stall_number ?? 'N/A',
-                                'section_name' => $payment->rented?->stall?->section?->name ?? 'N/A',
-                                'area_name' => $payment->rented?->stall?->section?->area?->name ?? 'N/A',
-                                'payment_id' => $payment->id,
-                            ];
+                            return $this->getStallInfo($payment);
                         })->toArray(),
                         'payment_types' => $group->pluck('payment_type')->unique()->values()->toArray(),
                         'total_amount' => $group->sum('amount'),
                         'payment_count' => $group->count(),
                         'statuses' => $group->pluck('status')->unique()->values()->toArray(),
                         'all_payments' => $group->map(function ($payment) {
+                            $stallInfo = $this->getStallInfo($payment);
                             return [
                                 'id' => $payment->id,
                                 'payment_type' => $payment->payment_type,
@@ -189,9 +181,9 @@ class MarketOpenSpaceController extends Controller
                                 'missed_days' => $payment->missed_days,
                                 'advance_days' => $payment->advance_days,
                                 'rented_id' => $payment->rented_id,
-                                'stall_number' => $payment->rented?->stall?->stall_number ?? 'N/A',
-                                'section_name' => $payment->rented?->stall?->section?->name ?? 'N/A',
-                                'area_name' => $payment->rented?->stall?->section?->area?->name ?? 'N/A',
+                                'stall_number' => $stallInfo['stall_number'],
+                                'section_name' => $stallInfo['section_name'],
+                                'area_name' => $stallInfo['area_name'],
                             ];
                         })->toArray(),
                     ];
@@ -209,21 +201,17 @@ class MarketOpenSpaceController extends Controller
                     return [
                         'id' => $firstPayment->id,
                         'payment_date' => $firstPayment->payment_date->format('Y-m-d'),
-                        'vendor_name' => $firstPayment->vendor ? $firstPayment->vendor->first_name . ' ' . $firstPayment->vendor->last_name : 'Unknown',
+                        'vendor_name' => $this->getVendorName($firstPayment),
                         'vendor_id' => $firstPayment->vendor_id,
                         'stall_info' => $group->map(function ($payment) {
-                            return [
-                                'stall_number' => $payment->rented?->stall?->stall_number ?? 'N/A',
-                                'section_name' => $payment->rented?->stall?->section?->name ?? 'N/A',
-                                'area_name' => $payment->rented?->stall?->section?->area?->name ?? 'N/A',
-                                'payment_id' => $payment->id,
-                            ];
+                            return $this->getStallInfo($payment);
                         })->toArray(),
                         'payment_types' => $group->pluck('payment_type')->unique()->values()->toArray(),
                         'total_amount' => $group->sum('amount'),
                         'payment_count' => $group->count(),
                         'statuses' => $group->pluck('status')->unique()->values()->toArray(),
                         'all_payments' => $group->map(function ($payment) {
+                            $stallInfo = $this->getStallInfo($payment);
                             return [
                                 'id' => $payment->id,
                                 'payment_type' => $payment->payment_type,
@@ -232,9 +220,9 @@ class MarketOpenSpaceController extends Controller
                                 'missed_days' => $payment->missed_days,
                                 'advance_days' => $payment->advance_days,
                                 'rented_id' => $payment->rented_id,
-                                'stall_number' => $payment->rented?->stall?->stall_number ?? 'N/A',
-                                'section_name' => $payment->rented?->stall?->section?->name ?? 'N/A',
-                                'area_name' => $payment->rented?->stall?->section?->area?->name ?? 'N/A',
+                                'stall_number' => $stallInfo['stall_number'],
+                                'section_name' => $stallInfo['section_name'],
+                                'area_name' => $stallInfo['area_name'],
                             ];
                         })->toArray(),
                     ];
@@ -406,7 +394,7 @@ class MarketOpenSpaceController extends Controller
             $endDate = Carbon::createFromDate($year, $month, 1)->endOfMonth();
 
             // Get all payments for the month
-            $payments = Payments::with(['rented.stall.section.area', 'vendor'])
+            $payments = Payments::with(['rented.stall.section.area', 'vendor', 'eventVendor', 'stall'])
                 ->whereBetween('payment_date', [$startDate, $endDate])
                 ->whereIn('status', ['paid', 'collected'])
                 ->orderBy('payment_date', 'desc')
@@ -497,21 +485,17 @@ class MarketOpenSpaceController extends Controller
                 return [
                     'id' => $firstPayment->id,
                     'payment_date' => $firstPayment->payment_date->format('Y-m-d'),
-                    'vendor_name' => $firstPayment->vendor ? $firstPayment->vendor->first_name . ' ' . $firstPayment->vendor->last_name : 'Unknown',
+                    'vendor_name' => $this->getVendorName($firstPayment),
                     'vendor_id' => $firstPayment->vendor_id,
                     'stall_info' => $group->map(function ($payment) {
-                        return [
-                            'stall_number' => $payment->rented?->stall?->stall_number ?? 'N/A',
-                            'section_name' => $payment->rented?->stall?->section?->name ?? 'N/A',
-                            'area_name' => $payment->rented?->stall?->section?->area?->name ?? 'N/A',
-                            'payment_id' => $payment->id,
-                        ];
+                        return $this->getStallInfo($payment);
                     })->toArray(),
                     'payment_types' => $group->pluck('payment_type')->unique()->values()->toArray(),
                     'total_amount' => $group->sum('amount'),
                     'payment_count' => $group->count(),
                     'statuses' => $group->pluck('status')->unique()->values()->toArray(),
                     'all_payments' => $group->map(function ($payment) {
+                        $stallInfo = $this->getStallInfo($payment);
                         return [
                             'id' => $payment->id,
                             'payment_type' => $payment->payment_type,
@@ -520,9 +504,9 @@ class MarketOpenSpaceController extends Controller
                             'missed_days' => $payment->missed_days,
                             'advance_days' => $payment->advance_days,
                             'rented_id' => $payment->rented_id,
-                            'stall_number' => $payment->rented?->stall?->stall_number ?? 'N/A',
-                            'section_name' => $payment->rented?->stall?->section?->name ?? 'N/A',
-                            'area_name' => $payment->rented?->stall?->section?->area?->name ?? 'N/A',
+                            'stall_number' => $stallInfo['stall_number'],
+                            'section_name' => $stallInfo['section_name'],
+                            'area_name' => $stallInfo['area_name'],
                         ];
                     })->toArray(),
                 ];
@@ -596,19 +580,6 @@ class MarketOpenSpaceController extends Controller
 
     /**
      * Get payment details for view modal
-     */
-    public function getPaymentDetails($paymentId)
-    {
-        try {
-            $payment = Payments::with([
-                'vendor',
-                'rented.stall.section.area',
-                'rented.vendor'
-            ])->findOrFail($paymentId);
-
-            return response()->json([
-                'success' => true,
-                'data' => [
                     'id' => $payment->id,
                     'payment_date' => $payment->payment_date->format('Y-m-d'),
                     'vendor' => [
@@ -663,6 +634,8 @@ class MarketOpenSpaceController extends Controller
 
             $payments = Payments::with([
                 'vendor',
+                'eventVendor',
+                'stall',
                 'rented.stall.section.area',
                 'rented.vendor'
             ])->whereIn('id', $paymentIds)->get();
@@ -671,17 +644,8 @@ class MarketOpenSpaceController extends Controller
                 return [
                     'id' => $payment->id,
                     'payment_date' => $payment->payment_date->format('Y-m-d'),
-                    'vendor' => [
-                        'id' => $payment->vendor?->id,
-                        'name' => $payment->vendor ? $payment->vendor->first_name . ' ' . $payment->vendor->last_name : 'Unknown',
-                        'contact_number' => $payment->vendor?->contact_number,
-                        'address' => $payment->vendor?->address,
-                    ],
-                    'stall_info' => [
-                        'stall_number' => $payment->rented?->stall?->stall_number ?? 'N/A',
-                        'section_name' => $payment->rented?->stall?->section?->name ?? 'N/A',
-                        'area_name' => $payment->rented?->stall?->section?->area?->name ?? 'N/A',
-                    ],
+                    'vendor' => $this->getVendorDetails($payment),
+                    'stall_info' => $this->getStallInfo($payment),
                     'payment_details' => [
                         'payment_type' => $payment->payment_type,
                         'amount' => $payment->amount,
@@ -720,5 +684,79 @@ class MarketOpenSpaceController extends Controller
                 'message' => 'Failed to fetch grouped payment details: ' . $e->getMessage()
             ], 500);
         }
+    }
+
+    /**
+     * Get vendor name - use event_vendor if vendor_id is null
+     */
+    private function getVendorName($payment)
+    {
+        if ($payment->vendor_id && $payment->vendor) {
+            return $payment->vendor->first_name . ' ' . $payment->vendor->last_name;
+        } elseif ($payment->event_vendor_id && $payment->eventVendor) {
+            return $payment->eventVendor->first_name . ' ' . $payment->eventVendor->last_name;
+        }
+        return 'Unknown';
+    }
+
+    /**
+     * Get vendor details array - use event_vendor if vendor_id is null
+     */
+    private function getVendorDetails($payment)
+    {
+        if ($payment->vendor_id && $payment->vendor) {
+            return [
+                'id' => $payment->vendor->id,
+                'name' => $payment->vendor->first_name . ' ' . $payment->vendor->last_name,
+                'contact_number' => $payment->vendor->contact_number,
+                'address' => $payment->vendor->address,
+            ];
+        } elseif ($payment->event_vendor_id && $payment->eventVendor) {
+            return [
+                'id' => $payment->eventVendor->id,
+                'name' => $payment->eventVendor->first_name . ' ' . $payment->eventVendor->last_name,
+                'contact_number' => $payment->eventVendor->contact_number,
+                'address' => $payment->eventVendor->address,
+            ];
+        }
+        return [
+            'id' => null,
+            'name' => 'Unknown',
+            'contact_number' => 'N/A',
+            'address' => 'N/A',
+        ];
+    }
+
+    /**
+     * Get stall info - display stall_number if available, otherwise stall_name
+     */
+    private function getStallInfo($payment)
+    {
+        // For event stalls
+        if ($payment->stall_id && $payment->stall) {
+            return [
+                'stall_number' => $payment->stall->stall_number ?? $payment->stall->stall_name ?? 'N/A',
+                'section_name' => $payment->stall->location ?? 'N/A',
+                'area_name' => 'Event',
+                'payment_id' => $payment->id,
+            ];
+        }
+        
+        // For regular market stalls
+        if ($payment->rented_id && $payment->rented?->stall) {
+            return [
+                'stall_number' => $payment->rented->stall->stall_number ?? 'N/A',
+                'section_name' => $payment->rented->stall->section?->name ?? 'N/A',
+                'area_name' => $payment->rented->stall->section?->area?->name ?? 'N/A',
+                'payment_id' => $payment->id,
+            ];
+        }
+        
+        return [
+            'stall_number' => 'N/A',
+            'section_name' => 'N/A',
+            'area_name' => 'N/A',
+            'payment_id' => $payment->id,
+        ];
     }
 }

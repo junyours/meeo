@@ -8,6 +8,9 @@ use App\Models\Notification;
 use App\Models\VendorDetails;
 use App\Models\Remittanceable;
 use App\Models\InchargeCollector;
+use App\Models\EventActivity;
+use App\Models\EventStall;
+use App\Models\EventVendor;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 
@@ -17,8 +20,8 @@ class Payments extends Model
 
       protected $fillable = [
         'rented_id',
- 
-    'vendor_id',
+        'vendor_id',
+        'event_vendor_id',
         'payment_type',
         'amount',
         'or_number',
@@ -26,6 +29,8 @@ class Payments extends Model
         'missed_days',
         'advance_days',
         'status',
+        'activity_id',
+        'stall_id',
     ];
 
     protected $casts = [
@@ -42,6 +47,21 @@ class Payments extends Model
        public function vendor()
     {
         return $this->belongsTo(VendorDetails::class, 'vendor_id');
+    }
+
+    public function eventVendor()
+    {
+        return $this->belongsTo(EventVendor::class, 'event_vendor_id');
+    }
+
+    public function activity()
+    {
+        return $this->belongsTo(EventActivity::class, 'activity_id');
+    }
+
+    public function stall()
+    {
+        return $this->belongsTo(EventStall::class, 'stall_id');
     }
 
     

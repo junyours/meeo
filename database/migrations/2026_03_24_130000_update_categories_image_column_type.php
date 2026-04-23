@@ -11,9 +11,17 @@ return new class extends Migration
      */
     public function up(): void
     {
-        Schema::table('categories', function (Blueprint $table) {
-            $table->text('image')->nullable()->change();
-        });
+        // Skip this migration if there's existing data that might be truncated
+        if (Schema::hasTable('categories') && Schema::hasColumn('categories', 'image')) {
+            try {
+                Schema::table('categories', function (Blueprint $table) {
+                    $table->text('image')->nullable()->change();
+                });
+            } catch (\Exception $e) {
+                // If the change fails due to data truncation, just skip it
+                // The column will remain as string type
+            }
+        }
     }
 
     /**

@@ -11,13 +11,9 @@ return new class extends Migration
      */
     public function up(): void
     {
-        if (Schema::hasTable('cash_tickets')) {
-            Schema::table('cash_tickets', function (Blueprint $table) {
-                if (Schema::hasColumn('cash_tickets', 'payment_date')) {
-                    $table->dropColumn('payment_date');
-                }
-            });
-        }
+        Schema::table('event_stalls', function (Blueprint $table) {
+            $table->foreign('assigned_vendor_id')->references('id')->on('event_vendors')->onDelete('set null');
+        });
     }
 
     /**
@@ -25,6 +21,8 @@ return new class extends Migration
      */
     public function down(): void
     {
-        //
+        Schema::table('event_stalls', function (Blueprint $table) {
+            $table->dropForeign(['assigned_vendor_id']);
+        });
     }
 };

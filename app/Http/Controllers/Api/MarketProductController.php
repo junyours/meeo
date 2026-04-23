@@ -66,14 +66,6 @@ class MarketProductController extends Controller
     {
         $product = MarketProduct::findOrFail($id);
         
-        \Log::info('Product update request received', [
-            'product_id' => $product->id,
-            'request_data' => $request->all(),
-            'has_file' => $request->hasFile('image'),
-            'has_existing_image' => $request->has('existing_image'),
-            'existing_image_value' => $request->input('existing_image'),
-            'current_product_image' => $product->image
-        ]);
 
         $request->validate([
             'name' => 'required|string|max:255',
@@ -93,29 +85,19 @@ class MarketProductController extends Controller
         }
         
         if ($request->hasFile('image')) {
-            \Log::info('Processing new image upload for product');
-            
             $image = $request->file('image');
             $imageData = file_get_contents($image->getPathname());
             $mimeType = $image->getMimeType();
             $base64Image = 'data:' . $mimeType . ';base64,' . base64_encode($imageData);
             $data['image'] = $base64Image;
-            
-            \Log::info('New product image stored as base64', ['mimeType' => $mimeType]);
         } elseif ($request->has('existing_image')) {
             // Keep existing image
             $data['image'] = $request->existing_image;
-            \Log::info('Keeping existing product image', ['url' => $data['image']]);
         } else {
-            \Log::info('No product image provided, image will be removed');
             $data['image'] = null;
         }
 
-        \Log::info('Final data for product update', ['data' => $data]);
-        
         $product->update($data);
-        
-        \Log::info('Product updated successfully', ['updated_product' => $product->fresh()]);
         
         return response()->json($product);
     }
@@ -123,10 +105,23 @@ class MarketProductController extends Controller
     /**
      * Remove the specified resource from storage.
      */
-    public function destroy(MarketProduct $product)
+    public function destroy($id)
     {
-        $product->delete();
-        return response()->json(null, 204);
+        try {
+            $product = MarketProduct::findOrFail($id);
+            $product->delete();
+            return response()->json(['message' => 'Product deleted successfully'], 200);
+        } catch (\Illuminate\Database\Eloquent\ModelNotFoundException $e) {
+            return response()->json([
+                'message' => 'Product not found',
+                'error' => 'The product with ID ' . $id . ' does not exist'
+            ], 404);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => 'Failed to delete product',
+                'error' => $e->getMessage()
+            ], 500);
+        }
     }
 
     /**
@@ -136,7 +131,6 @@ class MarketProductController extends Controller
     {
         $products = MarketProduct::with('category')
             ->where('category_id', $categoryId)
-            ->where('available', true)
             ->get();
         
         return response()->json($products);

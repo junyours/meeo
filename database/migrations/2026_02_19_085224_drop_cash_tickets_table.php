@@ -11,6 +11,8 @@ return new class extends Migration
      */
     public function up(): void
     {
+        // Drop dependent table first
+        Schema::dropIfExists('cash_tickets_payments');
         Schema::dropIfExists('cash_tickets');
     }
 
