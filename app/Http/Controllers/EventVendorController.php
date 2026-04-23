@@ -36,7 +36,7 @@ class EventVendorController extends Controller
                 $query->where('status', $request->get('status'));
             }
 
-            $vendors = $query->orderBy('created_at', 'desc')->paginate(10);
+            $vendors = $query->orderBy('created_at', 'desc')->get();
 
             return response()->json([
                 'vendors' => $vendors,
