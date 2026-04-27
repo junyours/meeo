@@ -633,15 +633,16 @@ Route::middleware('auth:sanctum')->prefix('event-stalls')->group(function () {
 Route::middleware('auth:sanctum')->prefix('event-payments')->group(function () {
     Route::get('/', [EventPaymentController::class, 'index']);
     Route::post('/', [EventPaymentController::class, 'store']);
-    Route::get('/{id}', [EventPaymentController::class, 'show']);
-    Route::put('/{id}', [EventPaymentController::class, 'update']);
-    Route::delete('/{id}', [EventPaymentController::class, 'destroy']);
+    Route::get('/existing-dates', [EventPaymentController::class, 'getExistingPaymentDates']);
     Route::get('/activity/{activityId}', [EventPaymentController::class, 'getActivityPayments']);
     Route::get('/stall/{stallId}', [EventPaymentController::class, 'getStallPayments']);
     Route::get('/vendor/{vendorId}', [EventPaymentController::class, 'getVendorPayments']);
     Route::get('/summary', [EventPaymentController::class, 'getPaymentSummary']);
     Route::get('/vendors/{activityId}', [EventPaymentController::class, 'getVendorsByActivity']);
     Route::get('/stalls/{activityId}/{vendorId}', [EventPaymentController::class, 'getStallsByVendorAndActivity']);
+    Route::get('/{id}', [EventPaymentController::class, 'show']);
+    Route::put('/{id}', [EventPaymentController::class, 'update']);
+    Route::delete('/{id}', [EventPaymentController::class, 'destroy']);
 });
 
 Route::middleware('auth:sanctum')->prefix('event-sales')->group(function () {
@@ -651,6 +652,9 @@ Route::middleware('auth:sanctum')->prefix('event-sales')->group(function () {
     Route::put('/reports/{id}', [EventSalesController::class, 'updateSalesReport']);
     Route::delete('/reports/{id}', [EventSalesController::class, 'destroySalesReport']);
     Route::get('/stall/{stallId}/history', [EventSalesController::class, 'getStallSalesHistory']);
+    Route::get('/vendor/{activityId}/{vendorId}/report-dates', [EventSalesController::class, 'getVendorReportDates']);
+    Route::delete('/reports/by-day', [EventSalesController::class, 'deleteSalesReportByDay']);
+    Route::post('/reports/by-day', [EventSalesController::class, 'deleteSalesReportByDay']);
 });
 
 Route::middleware('auth:sanctum')->prefix('activity-sales-reports')->group(function () {
@@ -673,4 +677,5 @@ Route::middleware('auth:sanctum')->prefix('event-vendors')->group(function () {
     Route::delete('/{id}', [EventVendorController::class, 'destroy']);
     Route::patch('/{id}/status', [EventVendorController::class, 'updateStatus']);
     Route::get('/available', [EventVendorController::class, 'getAvailableVendors']);
+    Route::get('/activity/{activityId}', [EventVendorController::class, 'getVendorsByActivity']);
 });

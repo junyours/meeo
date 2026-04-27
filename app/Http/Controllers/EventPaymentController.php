@@ -41,8 +41,7 @@ class EventPaymentController extends Controller
             $query->whereBetween('payment_date', [$request->date_from, $request->date_to]);
         }
 
-        $payments = $query->orderBy('payment_date', 'desc')
-            ->paginate(20);
+        $payments = $query->orderBy('payment_date', 'desc')->get();
 
         return response()->json([
             'payments' => $payments,
@@ -376,6 +375,50 @@ class EventPaymentController extends Controller
         } catch (\Exception $e) {
             return response()->json([
                 'message' => 'Failed to fetch stalls for vendor',
+                'error' => $e->getMessage(),
+                'status' => 'error'
+            ], 500);
+        }
+    }
+
+    public function getExistingPaymentDates(Request $request)
+    {
+        try {
+            $validator = Validator::make($request->all(), [
+                'activity_id' => 'required|exists:event_activities,id',
+                'event_vendor_id' => 'required|exists:event_vendors,id',
+                'stall_id' => 'required|exists:event_stalls,id',
+            ]);
+
+            if ($validator->fails()) {
+                return response()->json([
+                    'message' => 'Validation failed',
+                    'errors' => $validator->errors(),
+                    'status' => 'error'
+                ], 422);
+            }
+
+            // Get existing payment dates for this specific activity, vendor, and stall combination
+            $existingPayments = Payments::where('payment_type', 'event')
+                ->where('activity_id', $request->activity_id)
+                ->where('event_vendor_id', $request->event_vendor_id)
+                ->where('stall_id', $request->stall_id)
+                ->where('status', 'paid')
+                ->pluck('payment_date')
+                ->map(function($date) {
+                    return date('Y-m-d', strtotime($date));
+                })
+                ->unique()
+                ->values();
+
+            return response()->json([
+                'existing_dates' => $existingPayments,
+                'status' => 'success'
+            ]);
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => 'Failed to fetch existing payment dates',
                 'error' => $e->getMessage(),
                 'status' => 'error'
             ], 500);

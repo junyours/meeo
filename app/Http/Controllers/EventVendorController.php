@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\EventVendor;
+use App\Models\EventStall;
 use App\Models\AdminActivity;
 use Illuminate\Http\Request;
 use Illuminate\Http\JsonResponse;
@@ -45,6 +46,32 @@ class EventVendorController extends Controller
         } catch (\Exception $e) {
             return response()->json([
                 'message' => 'Error retrieving event vendors: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Get vendors assigned to stalls for a specific activity.
+     */
+    public function getVendorsByActivity(Request $request, $activityId): JsonResponse
+    {
+        try {
+            // Get vendors who have assigned stalls in the specified activity
+            $vendors = EventVendor::whereHas('eventStalls', function ($query) use ($activityId) {
+                $query->where('activity_id', $activityId)
+                      ->where('status', 'occupied');
+            })->with(['eventStalls' => function ($query) use ($activityId) {
+                $query->where('activity_id', $activityId)
+                      ->where('status', 'occupied');
+            }])->get();
+
+            return response()->json([
+                'vendors' => $vendors,
+                'message' => 'Activity vendors retrieved successfully'
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => 'Error retrieving activity vendors: ' . $e->getMessage()
             ], 500);
         }
     }

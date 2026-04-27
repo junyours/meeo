@@ -17,10 +17,10 @@ class EventActivityController extends Controller
         $activities = EventActivity::with(['creator', 'stalls'])
             ->withCount(['stalls', 'stallAssignments'])
             ->orderBy('created_at', 'desc')
-            ->paginate(10);
+            ->get();
 
         // Transform activities to include formatted dates and duration
-        $activities->getCollection()->transform(function ($activity) {
+        $activities->transform(function ($activity) {
             $activity->formatted_start_date = $activity->formatted_start_date;
             $activity->formatted_end_date = $activity->formatted_end_date;
             $activity->duration = $activity->duration;

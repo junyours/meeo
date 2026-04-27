@@ -84,6 +84,7 @@ class EventSalesController extends Controller
                 'stall_number' => $stall->stall_number,
                 'stall_name' => $stall->stall_name,
                 'vendor_name' => $stall->assignedVendor ? $stall->assignedVendor->first_name . ' ' . $stall->assignedVendor->last_name : 'Unassigned',
+                'vendor_id' => $stall->assignedVendor ? $stall->assignedVendor->id : null,
                 'total_sales' => $totalSales,
                 'product_services' => implode(', ', $productNames),
                 'is_ambulant' => $stall->is_ambulant,
@@ -302,8 +303,64 @@ class EventSalesController extends Controller
             ], 201);
 
         } catch (\Exception $e) {
+            \Log::error('Error creating sales report: ' . $e->getMessage());
+            \Log::error('Exception trace', ['trace' => $e->getTraceAsString()]);
             return response()->json([
                 'message' => 'Error creating sales report: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Get existing report dates for a vendor in an activity
+     */
+    public function getVendorReportDates($activityId, $vendorId)
+    {
+        try {
+            $reports = ActivitySalesReport::where('activity_id', $activityId)
+                ->where('vendor_id', $vendorId)
+                ->select('report_date', 'day_number', 'stall_id')
+                ->get()
+                ->map(function ($report) {
+                    $report->report_date = \Carbon\Carbon::parse($report->report_date)->format('Y-m-d');
+                    return $report;
+                });
+
+            return response()->json([
+                'reports' => $reports,
+                'message' => 'Vendor report dates retrieved successfully'
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => 'Error retrieving vendor report dates: ' . $e->getMessage()
+            ], 500);
+        }
+    }
+
+    /**
+     * Delete sales reports for a specific vendor, activity, and day
+     */
+    public function deleteSalesReportByDay(Request $request)
+    {
+        try {
+            $validated = $request->validate([
+                'activity_id' => 'required|exists:event_activities,id',
+                'vendor_id' => 'required|exists:event_vendors,id',
+                'report_date' => 'required|date'
+            ]);
+
+            $deletedCount = ActivitySalesReport::where('activity_id', $validated['activity_id'])
+                ->where('vendor_id', $validated['vendor_id'])
+                ->where('report_date', $validated['report_date'])
+                ->delete();
+
+            return response()->json([
+                'message' => "Successfully deleted {$deletedCount} sales report(s) for the specified day",
+                'deleted_count' => $deletedCount
+            ]);
+        } catch (\Exception $e) {
+            return response()->json([
+                'message' => 'Error deleting sales reports: ' . $e->getMessage()
             ], 500);
         }
     }
