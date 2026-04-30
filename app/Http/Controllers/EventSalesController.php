@@ -115,14 +115,18 @@ class EventSalesController extends Controller
         // Calculate summary
         $totalStalls = $stalls->count();
         $totalSales = array_sum(array_column($salesData, 'total_sales'));
-        $lowestSales = !empty($salesData) ? min(array_column($salesData, 'total_sales')) : 0;
-        $highestSales = !empty($salesData) ? max(array_column($salesData, 'total_sales')) : 0;
+        
+        // Find detailed lowest and highest sales information
+        $lowestSalesDetails = $this->findLowestSales($salesData, $activity);
+        $highestSalesDetails = $this->findHighestSales($salesData, $activity);
         
         $summary = [
             'total_stalls' => $totalStalls,
             'total_sales' => $totalSales,
-            'lowest_sales' => $lowestSales,
-            'highest_sales' => $highestSales,
+            'lowest_sales' => $lowestSalesDetails['amount'],
+            'lowest_sales_details' => $lowestSalesDetails,
+            'highest_sales' => $highestSalesDetails['amount'],
+            'highest_sales_details' => $highestSalesDetails,
         ];
         
         // Format dates as YYYY-MM-DD to avoid timezone issues
@@ -379,5 +383,147 @@ class EventSalesController extends Controller
             'stall' => $stall,
             'sales_history' => $salesHistory
         ]);
+    }
+
+    /**
+     * Find the lowest sales details including vendor and day information
+     */
+    private function findLowestSales($salesData, $activity)
+    {
+        if (empty($salesData)) {
+            return [
+                'amount' => 0,
+                'vendor_name' => 'N/A',
+                'day' => 'N/A',
+                'date' => 'N/A',
+                'stall_number' => 'N/A'
+            ];
+        }
+
+        $lowestAmount = null;
+        $lowestDetails = null;
+
+        foreach ($salesData as $stall) {
+            // Check each day's income for this stall
+            $startDate = new \DateTime($activity->start_date);
+            
+            for ($day = 1; $day <= 365; $day++) { // Reasonable limit for days
+                $dayKey = "day{$day}_income";
+                if (!isset($stall[$dayKey])) {
+                    break; // No more days
+                }
+
+                $dayIncome = floatval($stall[$dayKey]);
+                
+                // Skip zero values for lowest sales (unless all are zero)
+                if ($dayIncome == 0) {
+                    continue;
+                }
+
+                if ($lowestAmount === null || $dayIncome < $lowestAmount) {
+                    $lowestAmount = $dayIncome;
+                    
+                    // Calculate the actual date for this day
+                    $currentDate = clone $startDate;
+                    $currentDate->add(new \DateInterval("P" . ($day - 1) . "D"));
+                    
+                    $lowestDetails = [
+                        'amount' => $dayIncome,
+                        'vendor_name' => $stall['vendor_name'] ?? 'N/A',
+                        'day' => "Day {$day}",
+                        'date' => $currentDate->format('F j, Y'),
+                        'stall_number' => $stall['stall_number'] ?? 'N/A'
+                    ];
+                }
+            }
+        }
+
+        // If all sales were zero or no positive sales found
+        if ($lowestDetails === null) {
+            // Find the first stall with any data (even if zero)
+            $firstStall = $salesData[0] ?? null;
+            if ($firstStall) {
+                $startDate = new \DateTime($activity->start_date);
+                $lowestDetails = [
+                    'amount' => 0,
+                    'vendor_name' => $firstStall['vendor_name'] ?? 'N/A',
+                    'day' => 'Day 1',
+                    'date' => $startDate->format('F j, Y'),
+                    'stall_number' => $firstStall['stall_number'] ?? 'N/A'
+                ];
+            } else {
+                $lowestDetails = [
+                    'amount' => 0,
+                    'vendor_name' => 'N/A',
+                    'day' => 'N/A',
+                    'date' => 'N/A',
+                    'stall_number' => 'N/A'
+                ];
+            }
+        }
+
+        return $lowestDetails;
+    }
+
+    /**
+     * Find the highest sales details including vendor and day information
+     */
+    private function findHighestSales($salesData, $activity)
+    {
+        if (empty($salesData)) {
+            return [
+                'amount' => 0,
+                'vendor_name' => 'N/A',
+                'day' => 'N/A',
+                'date' => 'N/A',
+                'stall_number' => 'N/A'
+            ];
+        }
+
+        $highestAmount = 0;
+        $highestDetails = null;
+
+        foreach ($salesData as $stall) {
+            // Check each day's income for this stall
+            $startDate = new \DateTime($activity->start_date);
+            
+            for ($day = 1; $day <= 365; $day++) { // Reasonable limit for days
+                $dayKey = "day{$day}_income";
+                if (!isset($stall[$dayKey])) {
+                    break; // No more days
+                }
+
+                $dayIncome = floatval($stall[$dayKey]);
+                
+                if ($dayIncome > $highestAmount) {
+                    $highestAmount = $dayIncome;
+                    
+                    // Calculate the actual date for this day
+                    $currentDate = clone $startDate;
+                    $currentDate->add(new \DateInterval("P" . ($day - 1) . "D"));
+                    
+                    $highestDetails = [
+                        'amount' => $dayIncome,
+                        'vendor_name' => $stall['vendor_name'] ?? 'N/A',
+                        'day' => "Day {$day}",
+                        'date' => $currentDate->format('F j, Y'),
+                        'stall_number' => $stall['stall_number'] ?? 'N/A'
+                    ];
+                }
+            }
+        }
+
+        // If no sales found
+        if ($highestDetails === null) {
+            $highestDetails = [
+                'amount' => 0,
+                'vendor_name' => 'N/A',
+                'day' => 'N/A',
+                'date' => 'N/A',
+                'stall_number' => 'N/A'
+            ];
+        }
+
+        return $highestDetails;
     }
 }
