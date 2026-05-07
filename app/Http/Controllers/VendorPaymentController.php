@@ -1305,6 +1305,194 @@ public function index()
      */
     private function calculateVendorMonthlyBalances($mappedRentals, $year)
     {
+        // Get vendor ID from first rental
+        $vendorId = null;
+        foreach ($mappedRentals as $rental) {
+            if (isset($rental['rental_id'])) {
+                $rentalModel = \App\Models\Rented::find($rental['rental_id']);
+                if ($rentalModel) {
+                    $vendorId = $rentalModel->vendor_id;
+                    break;
+                }
+            }
+        }
+        
+        if (!$vendorId) {
+            // Fallback to original logic if vendor ID not found
+            return $this->calculateVendorMonthlyBalancesFallback($mappedRentals, $year);
+        }
+        
+        // Use the exact same logic as VendorAnalysisController
+        $months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+        
+        // Get monthly payments using the same method as VendorAnalysisController
+        $monthlyPayments = $this->getMonthlyPaymentsForVendor($vendorId, $year);
+        
+        // Get all rented stalls for this vendor (same as VendorAnalysisController)
+        $rentedStalls = \App\Models\Rented::with(['stall.section', 'payments'])
+            ->where('vendor_id', $vendorId)
+            ->where(function($query) use ($year) {
+                $query->whereIn('status', ['active', 'occupied', 'advance', 'temp_closed', 'partial', 'fully paid'])
+                      ->orWhere(function($subQuery) use ($year) {
+                          $subQuery->where('status', 'unoccupied')
+                                   ->whereYear('created_at', '<=', $year)
+                                   ->where(function($dateQuery) use ($year) {
+                                       $dateQuery->whereYear('created_at', $year)
+                                                ->orWhereYear('updated_at', $year);
+                                   });
+                      });
+            })
+            ->get();
+
+        $vendorBalances = [];
+        
+        // Check for leap year and adjust February days
+        $isLeapYear = ($year % 4 == 0 && ($year % 100 != 0 || $year % 400 == 0));
+        $daysInMonths = [31, $isLeapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+        
+        foreach ($months as $index => $month) {
+            $payment = $monthlyPayments[$index] ?? 0;
+            
+            // Calculate monthly rate using day-by-day approach (exact same as VendorAnalysisController)
+            $monthlyRateForMonth = 0;
+            $targetMonth = $index + 1;
+            
+            // Create an array to hold daily rates for each day of the month
+            $dailyRates = [];
+            for ($day = 1; $day <= $daysInMonths[$index]; $day++) {
+                $dailyRates[$day] = 0;
+            }
+            
+            // Calculate the daily rate for each day based on active stalls
+            foreach ($rentedStalls as $rental) {
+                $section = $rental->stall->section;
+                $stall = $rental->stall;
+                
+                // Check if this rental was active during the target month
+                $rentalStart = $rental->created_at->copy()->startOfDay();
+                $monthStart = \Carbon\Carbon::createFromDate($year, $targetMonth, 1)->startOfDay();
+                $monthEnd = \Carbon\Carbon::createFromDate($year, $targetMonth, $daysInMonths[$index])->endOfDay();
+                
+                // Check if rental became unoccupied during this month or before
+                $rentalEnd = null;
+                if ($rental->status === 'unoccupied' && $rental->updated_at) {
+                    $rentalEnd = $rental->updated_at->copy()->endOfDay();
+                }
+                
+                // Skip if rental wasn't active during this month at all
+                if ($rentalStart->greaterThan($monthEnd) || 
+                    ($rentalEnd && $rentalEnd->lessThan($monthStart))) {
+                    continue;
+                }
+                
+                // Use the same rate calculation logic as VendorAnalysisController
+                $dailyRateToUse = 0;
+                
+                // Get historical rates (simplified for this context)
+                $hasStallDailyRate = !is_null($stall->daily_rate) && $stall->daily_rate > 0;
+                $hasStallMonthlyRate = !is_null($stall->monthly_rate) && $stall->monthly_rate > 0;
+                
+                // Check if stall is monthly
+                $isMonthlyStall = $stall->is_monthly;
+                
+                if ($isMonthlyStall && $hasStallMonthlyRate) {
+                    // For monthly stalls, use monthly rate directly
+                    $dailyRateToUse = $stall->monthly_rate / $daysInMonths[$index];
+                } elseif ($hasStallDailyRate && $hasStallMonthlyRate) {
+                    if ($stall->is_monthly) {
+                        $dailyRateToUse = $stall->monthly_rate / $daysInMonths[$index];
+                    } elseif ($stall->stall_number == 16 && strtolower($section->name) === 'meat & fish') {
+                        $dailyRateToUse = $stall->monthly_rate / $daysInMonths[$index];
+                    } else {
+                        $dailyRateToUse = $hasStallDailyRate ? $stall->daily_rate : $rental->daily_rent;
+                    }
+                } elseif ($section->rate_type === 'fixed') {
+                    $dailyRateToUse = floatval($section->monthly_rate ?? 0) / $daysInMonths[$index];
+                } else {
+                    $dailyRateToUse = $hasStallDailyRate ? $stall->daily_rate : $rental->daily_rent;
+                }
+                
+                // Add this stall's daily rate to each day it was active
+                for ($day = 1; $day <= $daysInMonths[$index]; $day++) {
+                    $currentDay = \Carbon\Carbon::createFromDate($year, $targetMonth, $day)->startOfDay();
+                    
+                    // Check if this stall is active on this specific day
+                    $isStallActiveOnDay = true;
+                    
+                    if ($rentalStart->greaterThan($currentDay)) {
+                        $isStallActiveOnDay = false;
+                    }
+                    
+                    if ($rentalEnd && $rentalEnd->lessThan($currentDay)) {
+                        $isStallActiveOnDay = false;
+                    }
+                    
+                    if ($isStallActiveOnDay) {
+                        $dailyRates[$day] += $dailyRateToUse;
+                    }
+                }
+            }
+            
+            // Sum up all daily rates to get the monthly rate
+            $monthlyRateForMonth = array_sum($dailyRates);
+            
+            // Calculate deposit (exact same as VendorAnalysisController)
+            $deposit = $payment > $monthlyRateForMonth ? $payment - $monthlyRateForMonth : 0;
+            
+            // If there's a deposit, balance should be 0, otherwise calculate normally
+            $balance = $deposit > 0 ? 0 : $monthlyRateForMonth - $payment;
+            
+            // Format to 2 decimal places and handle negative zero
+            $formattedPayment = number_format($payment, 2, '.', '');
+            $formattedMonthlyRate = number_format($monthlyRateForMonth, 2, '.', '');
+            $formattedBalance = number_format($balance, 2, '.', '');
+            $formattedDeposit = number_format($deposit, 2, '.', '');
+            
+            // Convert -0.00 to 0.00
+            if (abs($formattedBalance) < 0.01) {
+                $formattedBalance = '0.00';
+            }
+            
+            $vendorBalances[] = [
+                'month' => $month,
+                'monthly_rate' => (float) $formattedMonthlyRate,
+                'payment' => (float) $formattedPayment,
+                'balance' => (float) $formattedBalance,
+                'deposit' => (float) $formattedDeposit
+            ];
+        }
+        
+        return $vendorBalances;
+    }
+    
+    /**
+     * Get monthly payments for vendor (same as VendorAnalysisController)
+     */
+    private function getMonthlyPaymentsForVendor($vendorId, $year = null)
+    {
+        $targetYear = $year ?? now()->year;
+        
+        $payments = \App\Models\Payments::where('vendor_id', $vendorId)
+            ->whereYear('payment_date', $targetYear)
+            ->whereIn('status', ['paid', 'collected'])
+            ->get()
+            ->groupBy(function ($payment) {
+                return $payment->payment_date->format('n') - 1; // 0-based month index
+            });
+
+        $monthlyPayments = [];
+        for ($i = 0; $i < 12; $i++) {
+            $monthlyPayments[$i] = $payments->get($i, collect())->sum('amount');
+        }
+
+        return $monthlyPayments;
+    }
+    
+    /**
+     * Fallback method for vendor monthly balances calculation
+     */
+    private function calculateVendorMonthlyBalancesFallback($mappedRentals, $year)
+    {
         $months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
         $vendorBalances = [];
         
@@ -1324,19 +1512,27 @@ public function index()
                     $monthlyTotals[$month]['monthly_rate'] += $monthBalance['monthly_rate'];
                     $monthlyTotals[$month]['payment'] += $monthBalance['payment'];
                     $monthlyTotals[$month]['balance'] += $monthBalance['balance'];
-                    $monthlyTotals[$month]['deposit'] += $monthBalance['deposit'] ?? 0;
                 }
             }
         }
         
-        // Format the final balances
+        // Calculate deposit correctly at vendor level for each month
         foreach ($months as $month) {
+            $totalPayment = $monthlyTotals[$month]['payment'];
+            $totalMonthlyRate = $monthlyTotals[$month]['monthly_rate'];
+            
+            // Calculate deposit: total payments - total monthly rate across all rentals
+            $deposit = $totalPayment > $totalMonthlyRate ? $totalPayment - $totalMonthlyRate : 0;
+            
+            // If there's a deposit, balance should be 0, otherwise calculate normally
+            $balance = $deposit > 0 ? 0 : $totalMonthlyRate - $totalPayment;
+            
             $vendorBalances[] = [
                 'month' => $month,
-                'monthly_rate' => (float) number_format($monthlyTotals[$month]['monthly_rate'], 2, '.', ''),
-                'payment' => (float) number_format($monthlyTotals[$month]['payment'], 2, '.', ''),
-                'balance' => (float) number_format($monthlyTotals[$month]['balance'], 2, '.', ''),
-                'deposit' => (float) number_format($monthlyTotals[$month]['deposit'], 2, '.', '')
+                'monthly_rate' => (float) number_format($totalMonthlyRate, 2, '.', ''),
+                'payment' => (float) number_format($totalPayment, 2, '.', ''),
+                'balance' => (float) number_format($balance, 2, '.', ''),
+                'deposit' => (float) number_format($deposit, 2, '.', '')
             ];
         }
         
@@ -1496,35 +1692,48 @@ public function index()
             ], 403);
         }
 
-        // Calculate available deposit from the month (not individual payment)
+        // Calculate available deposit from the month across all rentals (not individual payment)
         $depositPaymentRental = $depositPayment->rented;
-        $isMonthlyStall = $depositPaymentRental->stall && $depositPaymentRental->stall->is_monthly;
         
         // Get the month when the payment was made
         $paymentMonth = Carbon::parse($depositPayment->payment_date)->month;
         $paymentYear = Carbon::parse($depositPayment->payment_date)->year;
         
-        // Calculate monthly rate for that month
-        if ($isMonthlyStall) {
-            $monthlyRate = $depositPaymentRental->monthly_rent ?: ($depositPaymentRental->stall->monthly_rate ?? 0);
-        } else {
-            // For daily stalls, get the actual days in that month
-            $isLeapYear = ($paymentYear % 4 == 0 && ($paymentYear % 100 != 0 || $paymentYear % 400 == 0));
-            $daysInMonth = [31, $isLeapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][$paymentMonth - 1];
-            $monthlyRate = $depositPaymentRental->daily_rent * $daysInMonth;
+        // Get all rentals for this vendor
+        $vendorRentals = $vendor->rented()->with(['stall', 'payments'])->get();
+        
+        // Calculate total monthly rate across all rentals for this month
+        $totalMonthlyRate = 0;
+        $totalMonthPayments = 0;
+        
+        foreach ($vendorRentals as $rental) {
+            $isMonthlyStall = $rental->stall && $rental->stall->is_monthly;
+            
+            // Calculate monthly rate for this rental
+            if ($isMonthlyStall) {
+                $rentalMonthlyRate = $rental->monthly_rent ?: ($rental->stall->monthly_rate ?? 0);
+            } else {
+                // For daily stalls, get the actual days in that month
+                $isLeapYear = ($paymentYear % 4 == 0 && ($paymentYear % 100 != 0 || $paymentYear % 400 == 0));
+                $daysInMonth = [31, $isLeapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][$paymentMonth - 1];
+                $rentalMonthlyRate = $rental->daily_rent * $daysInMonth;
+            }
+            
+            $totalMonthlyRate += $rentalMonthlyRate;
+            
+            // Get all payments for this rental in the same month
+            $rentalMonthPayments = $rental->payments
+                ->where('status', 'collected')
+                ->filter(function ($payment) use ($paymentMonth, $paymentYear) {
+                    $paymentDate = Carbon::parse($payment->payment_date);
+                    return $paymentDate->month == $paymentMonth && $paymentDate->year == $paymentYear;
+                });
+            
+            $totalMonthPayments += $rentalMonthPayments->sum('amount');
         }
         
-        // Get all payments for this rental in the same month
-        $monthPayments = $depositPaymentRental->payments
-            ->where('status', 'collected')
-            ->filter(function ($payment) use ($paymentMonth, $paymentYear) {
-                $paymentDate = Carbon::parse($payment->payment_date);
-                return $paymentDate->month == $paymentMonth && $paymentDate->year == $paymentYear;
-            });
-        
-        // Calculate total month payments and available deposit
-        $totalMonthPayments = $monthPayments->sum('amount');
-        $availableDeposit = max(0, $totalMonthPayments - $monthlyRate);
+        // Calculate total available deposit across all rentals
+        $availableDeposit = max(0, $totalMonthPayments - $totalMonthlyRate);
 
         if ($availableDeposit <= 0) {
             return response()->json([
@@ -1535,6 +1744,7 @@ public function index()
 
         // Calculate total amount needed for current payment
         $totalAmountNeeded = $customAmount ?: array_sum($amounts);
+        
 
         if ($totalAmountNeeded > $availableDeposit) {
             return response()->json([
@@ -1611,19 +1821,15 @@ public function index()
             ];
         }
 
-        // Update the original payment to track deposit consumption
-        // Reduce the original payment amount to reflect consumed deposit
-        $depositPayment->amount = $depositPayment->amount - $totalAmountNeeded;
-        
-        // If the entire payment amount is consumed, delete the payment record
-        if ($depositPayment->amount <= 0) {
-            $depositPayment->delete();
-        } else {
-            $depositPayment->save();
-        }
+        // Update payments to track deposit consumption - deduct from highest payments first
+        $this->deductDepositFromPayments($vendor, $paymentMonth, $paymentYear, $totalAmountNeeded);
+
+        // Recalculate monthly balances after deposit consumption
+        $this->recalculateMonthlyBalances($vendor, $paymentMonth, $paymentYear);
 
         // Calculate remaining deposit for response
         $remainingDeposit = $availableDeposit - $totalAmountNeeded;
+        
 
         // Send notification to vendor
         $successfulPayments = collect($results)->where('success', true);
@@ -1646,5 +1852,115 @@ public function index()
             'total_amount_consumed' => $totalAmountNeeded,
             'remaining_deposit' => $remainingDeposit,
         ]);
+    }
+
+    /**
+     * Deduct deposit amount from payments, starting with highest amounts first
+     */
+    private function deductDepositFromPayments($vendor, $paymentMonth, $paymentYear, $amountToDeduct)
+    {
+        
+        // Get all payments for this vendor in the specified month, sorted by amount (highest first)
+        $allPayments = Payments::where('vendor_id', $vendor->id)
+            ->where('status', 'collected')
+            ->whereHas('rented', function($query) use ($vendor) {
+                $query->where('vendor_id', $vendor->id);
+            })
+            ->get()
+            ->filter(function ($payment) use ($paymentMonth, $paymentYear) {
+                $paymentDate = Carbon::parse($payment->payment_date);
+                return $paymentDate->month == $paymentMonth && $paymentDate->year == $paymentYear;
+            })
+            ->sortByDesc('amount') // Sort by highest amount first
+            ->values();
+
+        
+        $remainingToDeduct = $amountToDeduct;
+        $actualDeducted = 0;
+
+        foreach ($allPayments as $index => $payment) {
+            if ($remainingToDeduct <= 0) {
+                break;
+            }
+
+            // Calculate how much to deduct from this payment
+            $deductFromThisPayment = min($payment->amount, $remainingToDeduct);
+            
+            
+            // Update the payment amount
+            $newAmount = $payment->amount - $deductFromThisPayment;
+            
+            if ($newAmount <= 0.01) { // Use small threshold to handle floating point precision
+                // Delete the payment if amount is essentially zero
+                $payment->delete();
+            } else {
+                // Update the payment with new amount
+                $payment->amount = $newAmount;
+                $payment->save();
+            }
+            
+            $remainingToDeduct -= $deductFromThisPayment;
+            $actualDeducted += $deductFromThisPayment;
+        }
+
+
+        return $actualDeducted; // Return actual amount deducted
+    }
+
+    /**
+     * Recalculate monthly balances after deposit consumption
+     */
+    private function recalculateMonthlyBalances($vendor, $paymentMonth, $paymentYear)
+    {
+        
+        // Get all rentals for this vendor
+        $vendorRentals = $vendor->rented()->with(['stall', 'payments'])->get();
+        
+        foreach ($vendorRentals as $rental) {
+            
+            // Get monthly balances for this rental
+            $monthlyBalances = $rental->monthly_balances ?: [];
+            
+            // Find the balance for the specific month
+            $monthIndex = $paymentMonth - 1; // Convert to 0-based index
+            
+            if (isset($monthlyBalances[$monthIndex])) {
+                $balance = &$monthlyBalances[$monthIndex];
+                
+                // Recalculate total payments for this month
+                $monthPayments = $rental->payments
+                    ->where('status', 'collected')
+                    ->filter(function ($payment) use ($paymentMonth, $paymentYear) {
+                        $paymentDate = Carbon::parse($payment->payment_date);
+                        return $paymentDate->month == $paymentMonth && $paymentDate->year == $paymentYear;
+                    });
+                
+                $totalMonthPayments = $monthPayments->sum('amount');
+                
+                // Calculate monthly rate
+                $isMonthlyStall = $rental->stall && $rental->stall->is_monthly;
+                if ($isMonthlyStall) {
+                    $monthlyRate = $rental->monthly_rent ?: ($rental->stall->monthly_rate ?? 0);
+                } else {
+                    // For daily stalls, get the actual days in that month
+                    $isLeapYear = ($paymentYear % 4 == 0 && ($paymentYear % 100 != 0 || $paymentYear % 400 == 0));
+                    $daysInMonth = [31, $isLeapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][$paymentMonth - 1];
+                    $monthlyRate = $rental->daily_rent * $daysInMonth;
+                }
+                
+                // Recalculate deposit
+                $newDeposit = max(0, $totalMonthPayments - $monthlyRate);
+                
+                
+                // Update the balance
+                $balance['deposit'] = $newDeposit;
+                $balance['total_payments'] = $totalMonthPayments;
+                
+                // Save updated monthly balances
+                $rental->monthly_balances = $monthlyBalances;
+                $rental->save();
+            }
+        }
+        
     }
 }
