@@ -260,6 +260,7 @@ Route::get('/reports/combined', [ReportsController::class, 'DepartmentsReport'])
 Route::get('/reports/rental-report', [ReportsController::class, 'rentalReport']);
 Route::get('/reports/vendor-details', [ReportsController::class, 'vendorDetails']);
 Route::middleware('auth:sanctum')->put('/rented/{id}/update-rented-at', [ReportsController::class, 'updateRentedAt']);
+Route::middleware('auth:sanctum')->delete('/rented/{id}/delete-record', [ReportsController::class, 'deleteRentedRecord']);
 
 Route::middleware('auth:sanctum')->get('/slaughter-already-remitted', [InchargeCollectorController::class, 'alreadyRemittedToday']);
 

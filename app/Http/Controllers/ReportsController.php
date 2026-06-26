@@ -817,6 +817,38 @@ public function updateRentedAt(Request $request, $rentedId)
     }
 }
 
+public function deleteRentedRecord(Request $request, $rentedId)
+{
+    try {
+        $rented = Rented::find($rentedId);
+        
+        if (!$rented) {
+            return response()->json([
+                'status' => 'error',
+                'message' => 'Rented record not found'
+            ], 404);
+        }
+
+        // Delete the rented record
+        $rented->delete();
+
+        return response()->json([
+            'status' => 'success',
+            'message' => 'Rented record deleted successfully',
+            'data' => [
+                'rented_id' => $rentedId,
+                'stall_number' => $rented->stall->stall_number ?? 'N/A'
+            ]
+        ]);
+        
+    } catch (\Exception $e) {
+        return response()->json([
+            'status' => 'error',
+            'message' => 'Failed to delete rented record: ' . $e->getMessage()
+        ], 500);
+    }
+}
+
 public function rentalReport(Request $request)
 {
     // Get active rentals with vendor, stall, section, and area information
