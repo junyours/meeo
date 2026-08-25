@@ -4,10 +4,10 @@ namespace App\Models;
 
 use App\Models\Rented;
 use App\Models\Remittance;
-use App\Models\Notification;
+
 use App\Models\VendorDetails;
 use App\Models\Remittanceable;
-use App\Models\InchargeCollector;
+
 use App\Models\EventActivity;
 use App\Models\EventStall;
 use App\Models\EventVendor;

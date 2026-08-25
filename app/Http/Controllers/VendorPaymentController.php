@@ -4,8 +4,6 @@ namespace App\Http\Controllers;
 
 use App\Models\VendorDetails;
 use App\Models\Rented;
-use App\Models\Stalls;
-use App\Models\Sections;
 use App\Models\Payments;
 use App\Models\Notification;
 use App\Services\StallRateHistoryService;
@@ -112,7 +110,9 @@ public function index()
         });
 
         // ✅ Calculate monthly balances for all rentals
-        $vendorMonthlyBalances = $this->calculateVendorMonthlyBalances($mappedRentals, $currentYear);
+        // Rental balances already include the historical rate calculation. Aggregate them
+        // directly instead of recalculating every rental day a second time.
+        $vendorMonthlyBalances = $this->calculateVendorMonthlyBalancesFallback($mappedRentals, $currentYear);
 
         return [
             'id' => $vendor->id,
@@ -197,17 +197,25 @@ public function index()
         $rentalIds = $request->input('rental_ids');
         $amounts = $request->input('amounts');
         $paymentTypes = $request->input('payment_types');
-        $advanceDays = $request->input('advance_days', []); // Get frontend advance days
+        $advanceDays = $request->input('advance_days', []);
         $paymentDate = Carbon::parse($request->input('payment_date'));
         $now = now();
+        $orNumber = $request->input('or_number');
+        $rentals = Rented::with(['vendor', 'stall', 'payments'])
+            ->whereIn('id', $rentalIds)
+            ->get()
+            ->keyBy('id');
         $results = [];
 
         foreach ($rentalIds as $index => $rentalId) {
             $amount = $amounts[$index];
             $paymentType = $paymentTypes[$index];
-            $frontendAdvanceDays = isset($advanceDays[$index]) ? $advanceDays[$index] : null;
-            
-            $rental = Rented::with(['vendor', 'stall', 'payments'])->findOrFail($rentalId);
+            $frontendAdvanceDays = $advanceDays[$index] ?? null;
+            $rental = $rentals->get($rentalId);
+
+            if (!$rental) {
+                abort(404);
+            }
             
             if ($rental->vendor_id !== $vendor->id) {
                 $results[] = [
@@ -234,7 +242,7 @@ public function index()
             }
 
             // Process payment using frontend advance days if provided
-            $result = $this->processPaymentForRental($rental, $amount, $paymentType, $paymentDate, $frontendAdvanceDays, $request->input('or_number'));
+            $result = $this->processPaymentForRental($rental, $amount, $paymentType, $paymentDate, $frontendAdvanceDays, $orNumber);
             $results[] = $result;
         }
 
@@ -248,7 +256,7 @@ public function index()
                 'vendor_id' => $vendor->id,
                 'title' => 'Bulk Payment Processed',
                 'message' => "Your bulk payment for {$stallCount} stall(s) totaling ₱" . 
-                            number_format($totalAmount, 2) . " with OR #{$request->input('or_number')} has been processed successfully.",
+                            number_format($totalAmount, 2) . " with OR #{$orNumber} has been processed successfully.",
                 'is_read' => 0,
             ]);
         }
@@ -961,11 +969,6 @@ public function index()
         $stall = $rental->stall;
         
         // Create an array to hold daily rates for each day of the month
-        $dailyRates = [];
-        for ($day = 1; $day <= $daysInMonth; $day++) {
-            $dailyRates[$day] = 0;
-        }
-        
         // Check if this rental was active during the target month
         $rentalStart = $rental->created_at->copy()->startOfDay();
         $monthStart = \Carbon\Carbon::createFromDate($targetYear, $targetMonth, 1)->startOfDay();
@@ -1023,31 +1026,11 @@ public function index()
             $dailyRateToUse = $hasStallDailyRate ? $historicalDailyRate : $rental->daily_rent;
         }
         
-        // Add this stall's daily rate to each day it was active
-        for ($day = 1; $day <= $daysInMonth; $day++) {
-            $currentDay = \Carbon\Carbon::createFromDate($targetYear, $targetMonth, $day)->startOfDay();
-            
-            // Check if this stall is active on this specific day
-            $isStallActiveOnDay = true;
-            
-            // If rental starts after this day, it's not active
-            if ($rentalStart->greaterThan($currentDay)) {
-                $isStallActiveOnDay = false;
-            }
-            
-            // If rental ended before this day, it's not active
-            if ($rentalEnd && $rentalEnd->lessThan($currentDay)) {
-                $isStallActiveOnDay = false;
-            }
-            
-            // Add the daily rate if the stall is active on this day
-            if ($isStallActiveOnDay) {
-                $dailyRates[$day] += $dailyRateToUse;
-            }
-        }
-        
-        // Sum up all daily rates to get the monthly rate
-        return array_sum($dailyRates);
+        $activeStart = $rentalStart->greaterThan($monthStart) ? $rentalStart : $monthStart;
+        $activeEnd = $rentalEnd && $rentalEnd->lessThan($monthEnd) ? $rentalEnd : $monthEnd;
+        $activeDays = $activeStart->diffInDays($activeEnd) + 1;
+
+        return $dailyRateToUse * min($daysInMonth, $activeDays);
     }
     private function calculateMonthlyBalancesForRental($rental, $year)
     {
@@ -1693,14 +1676,17 @@ public function index()
         }
 
         // Calculate available deposit from the month across all rentals (not individual payment)
-        $depositPaymentRental = $depositPayment->rented;
-        
         // Get the month when the payment was made
         $paymentMonth = Carbon::parse($depositPayment->payment_date)->month;
         $paymentYear = Carbon::parse($depositPayment->payment_date)->year;
         
         // Get all rentals for this vendor
-        $vendorRentals = $vendor->rented()->with(['stall', 'payments'])->get();
+        $vendorRentals = $vendor->rented()
+            ->with('stall')
+            ->get();
+        $vendorRentalsById = $vendorRentals->keyBy('id');
+        $monthStart = Carbon::create($paymentYear, $paymentMonth, 1)->startOfDay();
+        $monthEnd = $monthStart->copy()->endOfMonth()->endOfDay();
         
         // Calculate total monthly rate across all rentals for this month
         $totalMonthlyRate = 0;
@@ -1721,16 +1707,12 @@ public function index()
             
             $totalMonthlyRate += $rentalMonthlyRate;
             
-            // Get all payments for this rental in the same month
-            $rentalMonthPayments = $rental->payments
-                ->where('status', 'collected')
-                ->filter(function ($payment) use ($paymentMonth, $paymentYear) {
-                    $paymentDate = Carbon::parse($payment->payment_date);
-                    return $paymentDate->month == $paymentMonth && $paymentDate->year == $paymentYear;
-                });
-            
-            $totalMonthPayments += $rentalMonthPayments->sum('amount');
         }
+
+        $totalMonthPayments = Payments::where('vendor_id', $vendor->id)
+            ->where('status', 'collected')
+            ->whereBetween('payment_date', [$monthStart, $monthEnd])
+            ->sum('amount');
         
         // Calculate total available deposit across all rentals
         $availableDeposit = max(0, $totalMonthPayments - $totalMonthlyRate);
@@ -1759,7 +1741,11 @@ public function index()
             $paymentType = $paymentTypes[$index];
             $frontendAdvanceDays = isset($advanceDays[$index]) ? $advanceDays[$index] : null;
             
-            $rental = Rented::with(['vendor', 'stall', 'payments'])->findOrFail($rentalId);
+            $rental = $vendorRentalsById->get($rentalId);
+
+            if (!$rental) {
+                abort(404);
+            }
             
             if ($rental->vendor_id !== $vendor->id) {
                 $results[] = [
@@ -1861,18 +1847,17 @@ public function index()
     {
         
         // Get all payments for this vendor in the specified month, sorted by amount (highest first)
+        $monthStart = Carbon::create($paymentYear, $paymentMonth, 1)->startOfDay();
+        $monthEnd = $monthStart->copy()->endOfMonth()->endOfDay();
+
         $allPayments = Payments::where('vendor_id', $vendor->id)
             ->where('status', 'collected')
             ->whereHas('rented', function($query) use ($vendor) {
                 $query->where('vendor_id', $vendor->id);
             })
-            ->get()
-            ->filter(function ($payment) use ($paymentMonth, $paymentYear) {
-                $paymentDate = Carbon::parse($payment->payment_date);
-                return $paymentDate->month == $paymentMonth && $paymentDate->year == $paymentYear;
-            })
-            ->sortByDesc('amount') // Sort by highest amount first
-            ->values();
+            ->whereBetween('payment_date', [$monthStart, $monthEnd])
+            ->orderByDesc('amount')
+            ->get();
 
         
         $remainingToDeduct = $amountToDeduct;

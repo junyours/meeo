@@ -111,8 +111,8 @@ class SectionController extends Controller
     public function update(Request $request, $id)
     {
         $request->validate([
-        
-            'rate_type'   => 'nullable|in:per_sqm,fixed',
+        'name'        => 'nullable|string',
+             'rate_type'   => 'nullable|in:per_sqm,fixed',
             'rate'        => 'nullable|numeric',
             'monthly_rate'=> 'nullable|numeric',
         ]);
@@ -120,7 +120,7 @@ class SectionController extends Controller
         $section = Sections::findOrFail($id);
 
         $section->update([
-       
+             'name'   => $request->name,
             'rate_type'   => $request->rate_type,
             'rate'        => $request->rate_type === "per_sqm" ? $request->rate : null,
             'monthly_rate'=> $request->rate_type === "fixed" ? $request->monthly_rate : null,

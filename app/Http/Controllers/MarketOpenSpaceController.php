@@ -513,70 +513,7 @@ class MarketOpenSpaceController extends Controller
             });
     }
 
-    /**
-     * Get analytics data for Market & Open Space Collections
-     */
-    public function getAnalytics(Request $request)
-    {
-        try {
-            $months = $request->get('months', 6); // Default to last 6 months
-            
-            $monthlyData = [];
-            
-            for ($i = 0; $i < $months; $i++) {
-                $monthStart = Carbon::now()->subMonths($i)->startOfMonth();
-                $monthEnd = Carbon::now()->subMonths($i)->endOfMonth();
-                
-                $payments = Payments::with(['rented.stall.section.area'])
-                    ->whereBetween('payment_date', [$monthStart, $monthEnd])
-                    ->whereIn('status', ['paid', 'collected'])
-                    ->get();
 
-                $marketAmount = 0;
-                $openSpaceAmount = 0;
-                $tabocGymAmount = 0;
-
-                foreach ($payments as $payment) {
-                    $areaName = strtolower($payment->rented?->stall?->section?->area?->name ?? '');
-                    $sectionName = strtolower($payment->rented?->stall?->section?->name ?? '');
-                    
-                    // Debug logging
-                    // Log::info('Analytics categorization:', [
-                    //     'payment_id' => $payment->id,
-                    //     'area_name' => $areaName,
-                    //     'section_name' => $sectionName
-                    // ]);
-                    
-                    if (str_contains($sectionName, 'taboc') || str_contains($sectionName, 'gym')) {
-                        $tabocGymAmount += $payment->amount;
-                    } elseif ((str_contains($areaName, 'open space') || str_contains($areaName, 'open') || str_contains($areaName, 'space')) && !(str_contains($sectionName, 'taboc') || str_contains($sectionName, 'gym'))) {
-                        $openSpaceAmount += $payment->amount;
-                    } else {
-                        $marketAmount += $payment->amount;
-                    }
-                }
-
-                $monthlyData[] = [
-                    'month' => $monthStart->format('M Y'),
-                    'market_collections' => $marketAmount,
-                    'open_space_collections' => $openSpaceAmount,
-                    'taboc_gym_collections' => $tabocGymAmount,
-                    'total_collections' => $marketAmount + $openSpaceAmount + $tabocGymAmount
-                ];
-            }
-
-            return response()->json([
-                'success' => true,
-                'data' => array_reverse($monthlyData) // Most recent first
-            ]);
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Failed to fetch analytics: ' . $e->getMessage()
-            ], 500);
-        }
-    }
 
     /**
      * Get payment details for view modal

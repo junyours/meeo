@@ -537,36 +537,68 @@ public function display(Request $request)
     /**
      * Calculate expected collection for occupied stalls
      */
-    private function calculateExpectedCollection($type = 'daily')
-    {
-        // Get all occupied stalls with their sections, areas, and rental info
-        $occupiedStalls = Rented::with(['stall.section.area'])
-            ->whereHas('stall', function($query) {
-                $query->where('status', 'occupied');
-            })
-            ->get();
-        
-        $totalExpected = 0;
-        
-        foreach ($occupiedStalls as $rental) {
-            $section = $rental->stall->section;
-            $area = $section->area;
-            
-            if (!$section || !$area) continue;
-            
-            // Use rental rates first, then section rates as fallback
-            if ($type === 'daily') {
-                $rate = $rental->daily_rent ?? $section->daily_rate ?? $section->rate ?? ($area->name === 'Wet Area' ? 50 : 30);
-                $totalExpected += $rate;
-            } else {
-                $rate = $rental->monthly_rent ?? $section->monthly_rate ?? ($section->rate ?? ($area->name === 'Wet Area' ? 50 : 30)) * 30;
-                $totalExpected += $rate;
-            }
+   private function calculateExpectedCollection($type = 'daily')
+{
+    // Get all occupied stalls with their sections, areas, and rental information
+    $occupiedStalls = Rented::with([
+        'stall.section.area'
+    ])
+    ->whereHas('stall', function ($query) {
+        $query->where('status', 'occupied');
+    })
+    ->get();
+
+    $totalExpected = 0;
+
+    foreach ($occupiedStalls as $rental) {
+
+        // Make sure rental has a stall
+        if (!$rental->stall) {
+            continue;
         }
-        
-        return $totalExpected;
+
+        // Get section
+        $section = $rental->stall->section;
+
+        // Skip if stall has no section
+        if (!$section) {
+            continue;
+        }
+
+        // Get area
+        $area = $section->area;
+
+        // Skip if section has no area
+        if (!$area) {
+            continue;
+        }
+
+        // Use rental rates first,
+        // then section rates as fallback
+        if ($type === 'daily') {
+
+            $rate = $rental->daily_rent
+                ?? $section->daily_rate
+                ?? $section->rate
+                ?? ($area->name === 'Wet Area' ? 50 : 30);
+
+            $totalExpected += $rate;
+
+        } else {
+
+            $rate = $rental->monthly_rent
+                ?? $section->monthly_rate
+                ?? (
+                    $section->rate
+                    ?? ($area->name === 'Wet Area' ? 50 : 30)
+                ) * 30;
+
+            $totalExpected += $rate;
+        }
     }
-    
+
+    return $totalExpected;
+}
     /**
      * Calculate expected collections for specific area type
      */
