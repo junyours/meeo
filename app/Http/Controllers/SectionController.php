@@ -108,6 +108,61 @@ class SectionController extends Controller
         ], 200);
     }   
 
+        public function marketFees()
+        {
+            $sections = Sections::with(['stalls' => function ($query) {
+                $query->select('id', 'section_id', 'stall_number', 'size', 'daily_rate', 'monthly_rate')
+                    ->where('is_active', true);
+            }, 'area' => function ($query) {
+                $query->select('id', 'name');
+            }])->get();
+
+            $data = $sections->map(function ($section) {
+                $stalls = $section->stalls->map(function ($stall) use ($section) {
+                    $dailyRate = $stall->daily_rate;
+                    $monthlyRate = $stall->monthly_rate;
+
+                    if ($dailyRate === null && $monthlyRate !== null) {
+                        $dailyRate = $monthlyRate / 30;
+                    }
+
+                    if ($section->rate_type === 'per_sqm' && $section->rate !== null) {
+                        $dailyRate = $dailyRate ?? ($section->rate * ($stall->size ?? 0));
+                        $monthlyRate = $monthlyRate ?? ($dailyRate * 30);
+                    } else {
+                        $dailyRate = $dailyRate ?? $section->daily_rate;
+                        $monthlyRate = $monthlyRate ?? $section->monthly_rate;
+                    }
+
+                    if ($monthlyRate === null && $dailyRate !== null) {
+                        $monthlyRate = $dailyRate * 30;
+                    }
+
+                    return [
+                        'id' => $stall->id,
+                        'stall_number' => $stall->stall_number,
+                        'size' => $stall->size,
+                        'daily_rate' => $dailyRate !== null ? round($dailyRate, 2) : null,
+                        'monthly_rate' => $monthlyRate !== null ? round($monthlyRate, 2) : null,
+                    ];
+                })->values();
+
+                return [
+                    'id' => $section->id,
+                    'name' => $section->name,
+                    'rate_type' => $section->rate_type,
+                    'area' => $section->area,
+                    'stalls' => $stalls,
+                ];
+            })->values();
+
+            return response()->json([
+                'status' => 'success',
+                'message' => 'Current market rental fees fetched successfully.',
+                'data' => $data,
+            ], 200);
+        }
+
     public function update(Request $request, $id)
     {
         $request->validate([

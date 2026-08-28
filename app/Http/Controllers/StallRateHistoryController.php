@@ -2,13 +2,14 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\Stalls;
-use App\Models\StallRateHistory;
-use App\Models\Sections;
 use App\Models\Area;
 use App\Models\Rented;
+use App\Models\Sections;
+use App\Models\StallRateHistory;
+use App\Models\Stalls;
 use App\Services\StallRateHistoryService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
 
 class StallRateHistoryController extends Controller
 {
@@ -265,7 +266,7 @@ class StallRateHistoryController extends Controller
             ]);
 
         } catch (\Exception $e) {
-            \Log::error('Dashboard data error: ' . $e->getMessage());
+            Log::error('Dashboard data error: ' . $e->getMessage());
             return response()->json(['error' => 'Failed to load dashboard data'], 500);
         }
     }

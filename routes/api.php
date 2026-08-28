@@ -319,6 +319,7 @@ Route::prefix('public')->group(function () {
     Route::get('/categories', [AvailableProductsController::class, 'getCategories']);
     Route::get('/products', [AvailableProductsController::class, 'getAllProducts']);
     Route::get('/products/available', [AvailableProductsController::class, 'getAvailableProducts']);
+    Route::get('/market-fees', [SectionController::class, 'marketFees']);
     Route::get('/products/category/{categoryId}', [AvailableProductsController::class, 'getProductsByCategory']);
     Route::get('/products/{id}', [AvailableProductsController::class, 'getProduct']);
 });
