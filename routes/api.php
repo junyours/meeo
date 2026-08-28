@@ -3,6 +3,7 @@
 use App\Http\Controllers\ActivitySalesReportController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\AdminProfileController;
+use App\Http\Controllers\AvailableStallController;
 use App\Http\Controllers\Api\AvailableProductsController;
 use App\Http\Controllers\Api\CategoryController;
 use App\Http\Controllers\Api\MarketProductController;
@@ -316,6 +317,7 @@ Route::middleware('auth:sanctum')->prefix('categories')->group(function () {
 
 // 🏪 Public Available Products Routes (No Authentication Required)
 Route::prefix('public')->group(function () {
+    Route::get('/available-stalls', [AvailableStallController::class, 'index']);
     Route::get('/categories', [AvailableProductsController::class, 'getCategories']);
     Route::get('/products', [AvailableProductsController::class, 'getAllProducts']);
     Route::get('/products/available', [AvailableProductsController::class, 'getAvailableProducts']);

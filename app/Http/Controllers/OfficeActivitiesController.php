@@ -9,25 +9,30 @@ use Illuminate\Support\Facades\DB;
 
 class OfficeActivitiesController extends Controller
 {
-public function index(Request $request)
-{
-    try {
-        $activities = OfficeActivities::with('images')
-            ->orderBy('activity_date', 'desc')
-            ->get();
+    public function index(Request $request)
+    {
+        try {
+            $activities = OfficeActivities::with('images')
+                ->orderBy('activity_date', 'desc')
+                ->get();
 
-        return response()->json([
-            'success' => true,
-            'data' => $activities,
-        ], 200);
+            return response()->json([
+                'success' => true,
+                'message' => $activities->isEmpty()
+                    ? 'No office activities are available right now.'
+                    : 'Office activities loaded successfully.',
+                'data' => $activities,
+            ], 200);
+        } catch (\Throwable $e) {
+            report($e);
 
-    } catch (\Exception $e) {
-        return response()->json([
-            'success' => false,
-            'message' => $e->getMessage(),
-        ], 500);
+            return response()->json([
+                'success' => false,
+                'message' => 'Office activities are temporarily unavailable. Please try again later.',
+                'data' => [],
+            ], 500);
+        }
     }
-}
 
     /**
      * Store a new office activity.
