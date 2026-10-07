@@ -2,14 +2,15 @@
 
 namespace App\Http\Controllers;
 
-use App\Models\VendorDetails;
-use App\Models\Rented;
-use App\Models\Stalls;
-use App\Models\Sections;
 use App\Models\Payments;
+use App\Models\Rented;
+use App\Models\Sections;
+use App\Models\Stalls;
+use App\Models\VendorDetails;
 use App\Services\StallRateHistoryService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class VendorAnalysisController extends Controller
 {
@@ -85,6 +86,18 @@ class VendorAnalysisController extends Controller
                 ->get();
 
             $stallCount = $currentlyActiveRentedStalls->count();
+            $activeStallIds = $currentlyActiveRentedStalls->pluck('stall_id')->all();
+            $removedStalls = $rentedStalls
+                ->where('status', 'unoccupied')
+                ->reject(fn ($rental) => in_array($rental->stall_id, $activeStallIds))
+                ->unique('stall_id')
+                ->map(function ($rental) {
+                    return [
+                        'section_name' => $rental->stall->section->name,
+                        'stall_number' => $rental->stall->stall_number
+                    ];
+                })
+                ->values();
             $totalDaily = 0;
             $totalSpaceRights = 0;
 
@@ -182,6 +195,8 @@ class VendorAnalysisController extends Controller
             $vendorAggregatedData = [
                 'vendor_name' => $vendor->full_name,
                 'stall_count' => $stallCount,
+                'removed_stall_count' => $removedStalls->count(),
+                'removed_stalls' => $removedStalls,
                 'daily' => (float) number_format($totalDaily, 2, '.', ''),
                 'daily_display' => $this->getDailyDisplayText($currentlyActiveRentedStalls),
                 'monthly' => (float) number_format($totalMonthly, 2, '.', ''),
@@ -195,8 +210,10 @@ class VendorAnalysisController extends Controller
             // Get section-specific payment breakdown
             $sectionBreakdown = $this->getSectionBreakdown($vendorId, $targetYear);
             
-            // Get detailed payment information for monthly analysis
-            $monthlyPaymentDetails = $this->getMonthlyPaymentDetails($vendorId, $targetYear, $sectionFilter);
+            // Detailed daily payments are only needed by the ledger and OR-number editor.
+            $monthlyPaymentDetails = $request->boolean('include_payment_details', true)
+                ? $this->getMonthlyPaymentDetails($vendorId, $targetYear, $sectionFilter)
+                : [];
             
             // Calculate monthly balances
             $monthlyBalances = [];
@@ -229,7 +246,7 @@ class VendorAnalysisController extends Controller
                     $monthStart = \Carbon\Carbon::createFromDate($targetYear, $targetMonth, 1)->startOfDay();
                     $monthEnd = \Carbon\Carbon::createFromDate($targetYear, $targetMonth, $daysInMonths[$index])->endOfDay();
 
-                    \Log::info('Rental date info', [
+                    Log::info('Rental date info', [
                         'vendor_id' => $vendorId,
                         'month' => $month,
                         'rental_id' => $rental->id,
@@ -320,7 +337,7 @@ class VendorAnalysisController extends Controller
                         }
                     }
 
-                    \Log::info('Daily rates for rental', [
+                    Log::info('Daily rates for rental', [
                         'vendor_id' => $vendorId,
                         'month' => $month,
                         'rental_id' => $rental->id,
@@ -334,7 +351,7 @@ class VendorAnalysisController extends Controller
                 // Sum up all daily rates to get the monthly rate
                 $monthlyRateForMonth = array_sum($dailyRates);
                 
-                \Log::info('Calculated monthly rate using day-by-day approach', [
+                Log::info('Calculated monthly rate using day-by-day approach', [
                     'vendor_id' => $vendorId,
                     'month' => $month,
                     'target_year' => $targetYear,
@@ -375,11 +392,6 @@ class VendorAnalysisController extends Controller
                     'fullname' => $vendor->full_name
                 ],
                 'vendor_analysis' => $vendorAggregatedData,
-                'totals' => [
-                    'daily' => (float) number_format($totalDaily, 2, '.', ''),
-                    'monthly' => (float) number_format($totalMonthly, 2, '.', ''), // Keep standard 30-day rate for card display
-                    'annual' => (float) number_format($totalAnnual, 2, '.', '')
-                ],
                 'monthly_breakdown' => $monthlyBalances,
                 'monthly_payment_details' => $monthlyPaymentDetails,
                 'section_breakdown' => $sectionBreakdown,
@@ -391,6 +403,17 @@ class VendorAnalysisController extends Controller
 
             return response()->json($response);
         }
+
+    public function getVendorPaymentDetails($vendorId, Request $request)
+    {
+        VendorDetails::findOrFail($vendorId);
+
+        return response()->json($this->getMonthlyPaymentDetails(
+            $vendorId,
+            $request->input('year', now()->year),
+            $request->input('section')
+        ));
+    }
 
     private function getMonthlyPayments($vendorId, $year = null)
     {
@@ -448,6 +471,27 @@ class VendorAnalysisController extends Controller
             ->where('vendor_id', $vendorId)
             ->whereIn('status', ['active', 'occupied', 'advance', 'temp_closed', 'partial', 'fully paid'])
             ->get();
+
+        foreach ($rentedStalls as $rental) {
+            if (!$rental->stall || !$rental->stall->section) {
+                continue;
+            }
+
+            $section = $rental->stall->section;
+            $sectionId = $section->id;
+            if (!isset($sectionsData[$sectionId])) {
+                $sectionsData[$sectionId] = [
+                    'section_id' => $sectionId,
+                    'section_name' => $section->name,
+                    'stall_count' => 0,
+                    'daily_total' => 0,
+                    'daily_display' => '',
+                    'monthly_total' => 0,
+                    'space_rights' => 0,
+                    'monthly_breakdown' => [],
+                ];
+            }
+        }
         
         foreach ($currentlyActiveRentedStallsForSections as $rental) {
             $section = $rental->stall->section;
@@ -495,6 +539,23 @@ class VendorAnalysisController extends Controller
         
         // Calculate monthly breakdown for each section
         foreach ($sectionsData as $sectionId => &$sectionData) {
+            $stallBalanceData = [];
+            foreach ($rentedStalls as $rental) {
+                if (!$rental->stall || $rental->stall->section->id != $sectionId) {
+                    continue;
+                }
+
+                $stallKey = strtolower(trim((string) $rental->stall->stall_number));
+                if (!isset($stallBalanceData[$stallKey])) {
+                    $stallBalanceData[$stallKey] = [
+                        'section_name' => $rental->stall->section->name,
+                        'stall_number' => $rental->stall->stall_number,
+                        'remaining_balance' => 0,
+                        'monthly_payments' => array_fill(0, 12, 0),
+                    ];
+                }
+            }
+
             // Get all rentals in this section to calculate monthly total using historical rates
             $sectionMonthlyTotal = 0;
             foreach ($currentlyActiveRentedStallsForSections as $rental) {
@@ -556,7 +617,13 @@ class VendorAnalysisController extends Controller
                         });
                     
                     for ($i = 0; $i < 12; $i++) {
-                        $sectionMonthlyPayments[$i] += $rentalPayments->get($i, collect())->sum('amount');
+                        $monthPayment = $rentalPayments->get($i, collect())->sum('amount');
+                        $sectionMonthlyPayments[$i] += $monthPayment;
+
+                        $stallKey = strtolower(trim((string) $rental->stall->stall_number));
+                        if (isset($stallBalanceData[$stallKey])) {
+                            $stallBalanceData[$stallKey]['monthly_payments'][$i] += $monthPayment;
+                        }
                     }
                 }
             }
@@ -573,6 +640,10 @@ class VendorAnalysisController extends Controller
                 $dailyRates = [];
                 for ($day = 1; $day <= $daysInMonths[$index]; $day++) {
                     $dailyRates[$day] = 0;
+                }
+                $stallDailyRates = [];
+                foreach ($stallBalanceData as $stallKey => $stallData) {
+                    $stallDailyRates[$stallKey] = array_fill(1, $daysInMonths[$index], 0);
                 }
                 
                 // Calculate the daily rate for each day based on active stalls in this section
@@ -647,6 +718,10 @@ class VendorAnalysisController extends Controller
                             // Add the daily rate if the stall is active on this day
                             if ($isStallActiveOnDay) {
                                 $dailyRates[$day] += $dailyRateToUse;
+                                $stallKey = strtolower(trim((string) $stall->stall_number));
+                                if (isset($stallDailyRates[$stallKey])) {
+                                    $stallDailyRates[$stallKey][$day] += $dailyRateToUse;
+                                }
                             }
                         }
                     }
@@ -681,9 +756,21 @@ class VendorAnalysisController extends Controller
                     'deposit' => (float) $formattedDeposit,
                     'monthly_rate' => (float) $formattedMonthlyRate
                 ];
+
+                foreach ($stallBalanceData as $stallKey => &$stallData) {
+                    $stallMonthlyRate = array_sum($stallDailyRates[$stallKey] ?? []);
+                    $stallPayment = $stallData['monthly_payments'][$index] ?? 0;
+                    $stallBalance = max(0, $stallMonthlyRate - $stallPayment);
+                    $stallData['remaining_balance'] = round(
+                        $stallData['remaining_balance'] + $stallBalance,
+                        2
+                    );
+                }
+                unset($stallData);
             }
             
             // Format totals
+            $sectionData['stall_balances'] = array_values($stallBalanceData);
             $sectionData['daily_total'] = (float) number_format($sectionData['daily_total'], 2, '.', '');
             $sectionData['monthly_total'] = (float) number_format($sectionData['monthly_total'], 2, '.', '');
             $sectionData['space_rights'] = (float) number_format($sectionData['space_rights'], 2, '.', '');
@@ -920,6 +1007,9 @@ class VendorAnalysisController extends Controller
         $vendors = VendorDetails::where('status', 'active')
             ->orderBy('last_name')
             ->get();
+
+        // Notice PDFs use balances and section names, not the detailed daily ledger.
+        $request->query->set('include_payment_details', false);
         
         $vendorsWithBalances = [];
         

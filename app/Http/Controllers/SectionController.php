@@ -76,30 +76,23 @@ class SectionController extends Controller
 
      public function availableStalls()
     {
-        $sections = Sections::with(['stalls' => function ($query) {
-            $query->select('id', 'section_id', 'stall_number', 'size', 'status');
-        }, 'area' => function ($query) {
-            $query->select('id', 'name');
-        }])->get();
-
-        $sections = $sections->map(function ($section) {
-            $availableStalls = $section->stalls->where('status', 'vacant')->count();
-            $occupiedStalls = $section->stalls->where('status', 'occupied')->count();
-            
-            return [
+        $sections = Sections::query()
+            ->select('id', 'name', 'area_id')
+            ->with('area:id,name')
+            ->withCount([
+                'stalls as available_stalls_count' => fn ($query) => $query->where('status', 'vacant'),
+                'stalls as occupied_stalls_count' => fn ($query) => $query->where('status', 'occupied'),
+                'stalls as total_stalls',
+            ])
+            ->get()
+            ->map(fn ($section) => [
                 'id' => $section->id,
                 'name' => $section->name,
-                'rate_type' => $section->rate_type,
-                'rate' => $section->rate,
-                'monthly_rate' => $section->monthly_rate,
-                'daily_rate' => $section->daily_rate,
-                'stalls' => $section->stalls,
-                'available_stalls_count' => $availableStalls,
-                'occupied_stalls_count' => $occupiedStalls,
-                'total_stalls' => $section->stalls->count(),
-                'area' => $section->area
-            ];
-        });
+                'available_stalls_count' => $section->available_stalls_count,
+                'occupied_stalls_count' => $section->occupied_stalls_count,
+                'total_stalls' => $section->total_stalls,
+                'area' => ['name' => $section->area?->name],
+            ]);
 
         return response()->json([
             'status' => 'success',
@@ -110,7 +103,9 @@ class SectionController extends Controller
 
         public function marketFees()
         {
-            $sections = Sections::with(['stalls' => function ($query) {
+            $sections = Sections::query()
+                ->select('id', 'name', 'area_id', 'rate_type', 'rate', 'daily_rate', 'monthly_rate')
+                ->with(['stalls' => function ($query) {
                 $query->select('id', 'section_id', 'stall_number', 'size', 'daily_rate', 'monthly_rate')
                     ->where('is_active', true);
             }, 'area' => function ($query) {
@@ -141,7 +136,6 @@ class SectionController extends Controller
                     return [
                         'id' => $stall->id,
                         'stall_number' => $stall->stall_number,
-                        'size' => $stall->size,
                         'daily_rate' => $dailyRate !== null ? round($dailyRate, 2) : null,
                         'monthly_rate' => $monthlyRate !== null ? round($monthlyRate, 2) : null,
                     ];
@@ -151,7 +145,7 @@ class SectionController extends Controller
                     'id' => $section->id,
                     'name' => $section->name,
                     'rate_type' => $section->rate_type,
-                    'area' => $section->area,
+                    'area' => ['name' => $section->area?->name],
                     'stalls' => $stalls,
                 ];
             })->values();

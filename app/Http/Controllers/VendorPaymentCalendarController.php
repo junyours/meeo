@@ -4,7 +4,6 @@ namespace App\Http\Controllers;
 
 use App\Models\VendorDetails;
 use App\Models\Payments;
-use App\Models\Rented;
 use Illuminate\Http\Request;
 use Carbon\Carbon;
 
@@ -22,22 +21,49 @@ class VendorPaymentCalendarController extends Controller
         $month = $request->input('month');
         $startDate = Carbon::parse($month . '-01')->startOfMonth();
         $endDate = Carbon::parse($month . '-01')->endOfMonth();
+
+        $monthlyStats = Payments::whereBetween('payment_date', [$startDate, $endDate])
+            ->selectRaw('
+                COUNT(*) as total_payments,
+                COUNT(CASE WHEN payment_type = "daily" THEN 1 END) as daily_payments,
+                COUNT(CASE WHEN payment_type = "advance" THEN 1 END) as advance_payments,
+                COUNT(CASE WHEN payment_type = "partial" THEN 1 END) as partial_payments
+            ')
+            ->first();
         
-        // Get all vendors with their rentals (more permissive filtering)
-        $vendors = VendorDetails::with(['rented' => function($query) use ($startDate, $endDate) {
-            // More permissive rental filtering - get all rentals that might have payments
-            $query->where(function($q) use ($startDate, $endDate) {
-                $q->where('created_at', '<=', $endDate)
-                  ->orWhereHas('payments', function($paymentQuery) use ($startDate, $endDate) {
-                      $paymentQuery->whereBetween('payment_date', [$startDate, $endDate]);
-                  });
-            });
-        }, 'rented.stall', 'rented.payments' => function($query) use ($startDate, $endDate) {
-            $query->whereBetween('payment_date', [$startDate, $endDate]);
-        }])
-        ->where('status', 'active')
-        ->orderBy('last_name')
-        ->get();
+        $vendors = VendorDetails::query()
+            ->select('id', 'first_name', 'middle_name', 'last_name', 'contact_number')
+            ->with(['rented' => function ($rentalQuery) use ($startDate, $endDate) {
+                $rentalQuery->select(
+                    'id',
+                    'vendor_id',
+                    'stall_id',
+                    'status',
+                    'daily_rent',
+                    'monthly_rent',
+                    'created_at'
+                )->where(function ($query) use ($startDate, $endDate) {
+                    $query->where('created_at', '<=', $endDate)
+                        ->orWhereHas('payments', function ($paymentQuery) use ($startDate, $endDate) {
+                            $paymentQuery->whereBetween('payment_date', [$startDate, $endDate]);
+                        });
+                })->with([
+                    'stall:id,stall_number',
+                    'payments' => function ($paymentQuery) use ($startDate, $endDate) {
+                        $paymentQuery->select(
+                            'id',
+                            'rented_id',
+                            'payment_date',
+                            'payment_type',
+                            'amount',
+                            'advance_days'
+                        )->whereBetween('payment_date', [$startDate, $endDate]);
+                    },
+                ]);
+            }])
+            ->where('status', 'active')
+            ->orderBy('last_name')
+            ->get();
 
         $vendorCalendar = [];
         $daysInMonth = $startDate->daysInMonth;
@@ -142,16 +168,9 @@ class VendorPaymentCalendarController extends Controller
                     }
                     
                     $paymentsByDay[$day][] = [
-                        'id' => $payment->id,
                         'amount' => (float) $payment->amount,
                         'payment_type' => $payment->payment_type,
-                        'status' => $payment->status,
                         'stall_number' => $rental->stall->stall_number ?? 'N/A',
-                        'daily_rent' => (float) ($rental->daily_rent ?? 0),
-                        'monthly_rent' => (float) ($rental->monthly_rent ?? 0),
-                        'missed_days' => $payment->missed_days ?? 0,
-                        'advance_days' => $payment->advance_days ?? 0,
-                        'payment_date' => $payment->payment_date,
                     ];
                     
                     $totalMonthlyAmount += (float) $payment->amount;
@@ -208,10 +227,8 @@ class VendorPaymentCalendarController extends Controller
                 'vendor' => [
                     'id' => $vendor->id,
                     'fullname' => trim($vendor->first_name . ' ' . $vendor->middle_name . ' ' . $vendor->last_name),
-                    'first_name' => $vendor->first_name,
-                    'last_name' => $vendor->last_name,
                     'contact_number' => $vendor->contact_number,
-                    'email' => $vendor->email,
+            
                 ],
                 'rentals' => $vendor->rented->map(function($rental) {
                     return [
@@ -220,8 +237,6 @@ class VendorPaymentCalendarController extends Controller
                         'daily_rent' => (float) ($rental->daily_rent ?? 0),
                         'monthly_rent' => (float) ($rental->monthly_rent ?? 0),
                         'status' => $rental->status,
-                        'missed_days' => $rental->missed_days ?? 0,
-                        'remaining_balance' => (float) ($rental->remaining_balance ?? 0),
                     ];
                 }),
                 'payments_by_day' => $paymentsByDay,
@@ -251,7 +266,15 @@ class VendorPaymentCalendarController extends Controller
                 'total_missed_amount' => array_sum(array_column($vendorCalendar, 'total_missed_amount')),
                 'total_advance_covered_days' => array_sum(array_column($vendorCalendar, 'advance_covered_days')),
                 'total_advance_covered_amount' => array_sum(array_column($vendorCalendar, 'total_advance_covered_amount')),
-            ]
+            ],
+            'monthly_stats' => [
+                'total_payments' => (int) $monthlyStats->total_payments,
+                'payment_types' => [
+                    'daily' => (int) $monthlyStats->daily_payments,
+                    'advance' => (int) $monthlyStats->advance_payments,
+                    'partial' => (int) $monthlyStats->partial_payments,
+                ],
+            ],
         ]);
     }
 
@@ -268,12 +291,26 @@ class VendorPaymentCalendarController extends Controller
         $startDate = $date->copy()->startOfDay();
         $endDate = $date->copy()->endOfDay();
 
-        $vendor = VendorDetails::with(['rented' => function($query) {
-            $query->whereIn('status', ['active', 'occupied', 'advance', 'daily', 'partial', 'fully_paid', 'temp_closed']);
-        }, 'rented.stall', 'rented.payments' => function($query) use ($startDate, $endDate) {
-            $query->whereBetween('payment_date', [$startDate, $endDate]);
-        }])
-        ->findOrFail($vendorId);
+        $vendor = VendorDetails::query()
+            ->select('id', 'first_name', 'middle_name', 'last_name', 'contact_number')
+            ->with(['rented' => function ($rentalQuery) use ($startDate, $endDate) {
+                $rentalQuery->select('id', 'vendor_id', 'stall_id', 'daily_rent', 'monthly_rent')
+                    ->whereIn('status', ['active', 'occupied', 'advance', 'daily', 'partial', 'fully_paid', 'temp_closed'])
+                    ->with([
+                        'stall:id,stall_number',
+                        'payments' => function ($paymentQuery) use ($startDate, $endDate) {
+                            $paymentQuery->select(
+                                'id',
+                                'rented_id',
+                                'payment_date',
+                                'payment_type',
+                                'amount',
+                                'advance_days'
+                            )->whereBetween('payment_date', [$startDate, $endDate]);
+                        },
+                    ]);
+            }])
+            ->findOrFail($vendorId);
 
         $payments = [];
         foreach ($vendor->rented as $rental) {
@@ -282,14 +319,9 @@ class VendorPaymentCalendarController extends Controller
                     'id' => $payment->id,
                     'amount' => (float) $payment->amount,
                     'payment_type' => $payment->payment_type,
-                    'status' => $payment->status,
                     'stall_number' => $rental->stall->stall_number ?? 'N/A',
                     'daily_rent' => (float) ($rental->daily_rent ?? 0),
-                    'monthly_rent' => (float) ($rental->monthly_rent ?? 0),
-                    'missed_days' => $payment->missed_days ?? 0,
                     'advance_days' => $payment->advance_days ?? 0,
-                    'payment_date' => $payment->payment_date,
-                    'created_at' => $payment->created_at,
                 ];
             }
         }
@@ -299,11 +331,9 @@ class VendorPaymentCalendarController extends Controller
                 'id' => $vendor->id,
                 'fullname' => trim($vendor->first_name . ' ' . $vendor->middle_name . ' ' . $vendor->last_name),
                 'contact_number' => $vendor->contact_number,
-                'email' => $vendor->email,
+              
             ],
-            'date' => $request->input('date'),
             'payments' => $payments,
-            'total_amount' => array_sum(array_column($payments, 'amount')),
         ]);
     }
 

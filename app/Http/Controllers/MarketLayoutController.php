@@ -8,6 +8,7 @@ use App\Models\Stalls;
 use App\Models\VendorDetails;
 use App\Models\Rented;
 use App\Models\AdminActivity;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
@@ -323,7 +324,9 @@ class MarketLayoutController extends Controller
     {
         $validated = $request->validate([
             'vendor_id' => 'required|exists:vendor_details,id',
+            'assignment_date' => 'nullable|date|before_or_equal:today',
         ]);
+        $assignmentDate = Carbon::parse($validated['assignment_date'] ?? now()->toDateString())->startOfDay();
 
         try {
             DB::beginTransaction();
@@ -408,7 +411,7 @@ class MarketLayoutController extends Controller
             $monthlyRent = $this->computeMonthlyRate($stall, $section);
 
             // Create a new rented record for this assignment
-            $rented = Rented::create([
+            $rented = new Rented([
                 'vendor_id' => $vendor->id,
                 'stall_id' => $stall->id,
                 'monthly_rent' => $monthlyRent,
@@ -416,8 +419,10 @@ class MarketLayoutController extends Controller
                 'status' => 'occupied',
                 'missed_days' => 0,
                 'remaining_balance' => 0,
-                'next_due_date' => now()->addDay()->toDateString(), // Set to tomorrow
+                'next_due_date' => $assignmentDate->copy()->addDay()->toDateString(),
             ]);
+            $rented->created_at = $assignmentDate;
+            $rented->save();
 
             // Log the activity
             AdminActivity::log(
@@ -634,7 +639,9 @@ class MarketLayoutController extends Controller
                 'payment_type' => 'required|in:daily,monthly,both',
                 'daily_rate' => 'nullable|numeric|min:0',
                 'monthly_rate' => 'nullable|numeric|min:0',
+                'assignment_date' => 'nullable|date|before_or_equal:today',
             ]);
+            $assignmentDate = Carbon::parse($validated['assignment_date'] ?? now()->toDateString())->startOfDay();
 
             DB::beginTransaction();
 
@@ -676,16 +683,18 @@ class MarketLayoutController extends Controller
                 ]);
 
                 // Create rental record
-                Rented::create([
+                $rented = new Rented([
                     'vendor_id' => $vendor->id,
                     'stall_id' => $stall->id,
                     'daily_rent' => $dailyRate,
                     'monthly_rent' => $monthlyRate,
                     'status' => 'occupied',
-                    'next_due_date' => $validated['payment_type'] === 'monthly' 
-                        ? date('Y-m-d', strtotime('+1 month'))
-                        : date('Y-m-d', strtotime('+1 day')),
+                    'next_due_date' => $validated['payment_type'] === 'monthly'
+                        ? $assignmentDate->copy()->addMonth()->toDateString()
+                        : $assignmentDate->copy()->addDay()->toDateString(),
                 ]);
+                $rented->created_at = $assignmentDate;
+                $rented->save();
 
                 $assignedStalls[] = [
                     'stall_number' => $stall->stall_number,

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\Area;
+use App\Models\CashTicketsPayment;
 use App\Models\Department;
 use App\Models\InchargeCollector;
 use App\Models\MainCollector;
@@ -12,6 +13,7 @@ use App\Models\Notification;
 use App\Models\Payments;
 use App\Models\Rented;
 use App\Models\Sections;
+use App\Models\SlaughterhouseCollection;
 use App\Models\SlaughterPayment;
 use App\Models\StallRemovalRequest;
 use App\Models\Stalls;
@@ -26,138 +28,14 @@ use Illuminate\Support\Facades\Hash;
 class AdminController extends Controller
 {
 
-public function getRemovalRequests()
-{
-    // Fetch all stall removal requests with related stall, section, rented, and vendor
-    $requests = StallRemovalRequest::with([
-        'stall.section',       // Stall and its section
-        'vendor',              // Vendor who made the request
-        'rented.application.vendor' // Rented info and application vendor
-    ])->get();
-
-    $data = $requests->map(function ($request) {
-        $stall = $request->stall;
-        $rented = $request->rented;
-
-        return [
-            'id' => $request->id, // ID of the removal request
-            'stall_number' => $stall->stall_number ?? 'N/A',
-            'section' => [
-                'name' => $stall->section->name ?? 'N/A'
-            ],
-            'vendor_name' => $rented->application->vendor->fullname 
-                              ?? $request->vendor->fullname 
-                              ?? 'N/A',
-            'daily_rent' => $rented->daily_rent ?? 0,
-            'monthly_rent' => $rented->monthly_rent ?? 0,
-            'pending_removal' => $stall->pending_removal ?? false,
-            'stall_status' => $stall->status ?? 'N/A',
-            'request_status' => $request->status, // pending / approved / rejected
-            'request_message' => $request->message ?? '-', // message or rejection reason
-        ];
-    });
-
-    return response()->json([
-        'success' => true,
-        'requests' => $data
-    ]);
-}
 
 
 // Reject Removal
-public function rejectRemoval(Request $req, $id)
-{
-    $request = StallRemovalRequest::find($id);
-    if (!$request) {
-        return response()->json([
-            'success' => false,
-            'message' => 'Invalid request.'
-        ], 400);
-    }
 
-    $stall = $request->stall;
-    $vendor = $request->vendor;
-
-    DB::transaction(function () use ($stall, $request, $req, $vendor) {
-        // Reject request
-        $request->status = 'rejected';
-        $request->message = $req->input('reason', 'No reason provided');
-        $request->save();
-
-        // Reset pending_removal on stall
-        if ($stall) {
-            $stall->pending_removal = false;
-            $stall->save();
-        }
-
-        // Notify vendor
-        if ($vendor) {
-            Notification::create([
-                'vendor_id' => $vendor->id,
-                'title' => 'Stall Removal Rejected',
-                'message' => 'Your stall removal request was rejected. Reason: ' . $request->message,
-                'is_read' => false,
-            ]);
-        }
-    });
-
-    return response()->json([
-        'success' => true,
-        'message' => 'Stall removal rejected, pending_removal reset, and vendor notified.'
-    ]);
-}
 
 
 // Approve Removal
-public function approveRemoval($id)
-{
-    $request = StallRemovalRequest::find($id);
-    if (!$request) {
-        return response()->json([
-            'success' => false,
-            'message' => 'Invalid request.'
-        ], 400);
-    }
 
-    $stall = $request->stall;
-    $rented = $request->rented;
-    $vendor = $request->vendor;
-
-    DB::transaction(function () use ($stall, $rented, $request, $vendor) {
-        // Approve request
-        $request->status = 'approved';
-        $request->save();
-
-        // Update rented record
-        if ($rented) {
-            $rented->status = 'unoccupied';
-            $rented->save();
-        }
-
-        // Update stall
-        if ($stall) {
-            $stall->pending_removal = false;
-            $stall->status = 'vacant';
-            $stall->is_active = true;
-            $stall->save();
-        }
-
-        // Optional: notify vendor
-        if ($vendor) {
-            Notification::create([
-                'vendor_id' => $vendor->id,
-                'title' => 'Stall Removal Approved',
-                'message' => 'Your request for stall removal has been approved.',
-                'is_read' => false,
-            ]);
-        }
-    });
-
-    return response()->json([
-        'success' => true,
-        'message' => 'Stall removal approved successfully.'
-    ]);
-}
 
 public function register(Request $request)
     {
@@ -183,28 +61,9 @@ public function register(Request $request)
         ], 201);
     }
 
-public function getAdminNotifications()
-{
-    // All admin notifications, read or unread
-    $notifications = Notification::whereNull('vendor_id')
-        ->whereNull('customer_id')
-        ->whereNull('collector_id')
-        ->orderBy('created_at', 'desc')
-        ->get();
 
-    return response()->json($notifications);
-}
 
-public function markAsReadNotification($id)
-{
-    $notification = Notification::find($id);
-    if (!$notification) return response()->json(['message' => 'Not found'], 404);
 
-    $notification->is_read = 1;
-    $notification->save();
-
-    return response()->json(['message' => 'Notification marked as read']);
-}
 
 public function getRoles()
 {
@@ -251,12 +110,6 @@ public function validateVendor(Request $request, $id)
         ? 'Your profiling has been approved by the admin. You can do an application next.'
         : 'Your profiling has been rejected. You can submit profiling again.';
 
-    Notification::create([
-        'vendor_id' => $vendor->id,
-        'message'   => $message,
-        'title'     => 'Vendor Profiling Update',
-        'is_read'   => 0, // unread by default
-    ]);
 
     return response()->json(['message' => 'Vendor validation updated and notification created.']);
 }
@@ -264,22 +117,23 @@ public function validateVendor(Request $request, $id)
 
 public function display(Request $request)
 {
-        $year = $request->query('year', date('Y'));
-        $month = $request->query('month'); // Optional month parameter
-        
-        // Basic stats
-        $rentedStalls = Rented::whereIn('status', ['active', 'occupied', 'advance', 'temp_closed', 'partial', 'fully paid'])
-            ->distinct('vendor_id')
-            ->count('vendor_id');
-        $availableStalls = Stalls::where('status', 'vacant')->count();
-        $vendorCount = VendorDetails::count();
-        $inchargeCount = InchargeCollector::count();
-        $mainCount = MainCollector::count();
-        $meatCount = MeatInspector::count();
-        
-        // Calculate expected collections for today
-        $todayExpectedCollection = $this->calculateExpectedCollection('daily');
-        $monthlyExpectedCollection = $this->calculateExpectedCollection('monthly');
+        $validated = $request->validate([
+            'year' => 'nullable|integer|between:2000,2100',
+            'month' => 'nullable|integer|between:1,12',
+            'revenue_only' => 'sometimes|boolean',
+            'source_only' => 'sometimes|boolean',
+        ]);
+        $year = (int) ($validated['year'] ?? date('Y'));
+        $month = $validated['month'] ?? null;
+
+        if ($request->boolean('source_only')) {
+            return response()->json([
+                'collection_sources' => $this->getCollectionSourcesForMonth(
+                    $year,
+                    (int) ($month ?? now()->month)
+                ),
+            ]);
+        }
         
         // Calculate separate collections for Market, Open Space, and Taboc Gym
         if ($month) {
@@ -310,6 +164,37 @@ public function display(Request $request)
             $tabocGymCollections = $this->calculateAreaCollections('Taboc Gym', 'daily');
             $tabocGymMonthlyCollections = $this->calculateAreaCollections('Taboc Gym', 'monthly');
         }
+
+        $revenueStats = [
+            'market_daily_collection' => $marketCollections,
+            'market_monthly_collection' => $marketMonthlyCollections,
+            'market_monthly_revenue' => $marketRevenue ?? $marketMonthlyCollections,
+            'open_space_daily_collection' => $openSpaceCollections,
+            'open_space_monthly_collection' => $openSpaceMonthlyCollections,
+            'open_space_monthly_revenue' => $openSpaceRevenue ?? $openSpaceMonthlyCollections,
+            'taboc_gym_daily_collection' => $tabocGymCollections,
+            'taboc_gym_monthly_collection' => $tabocGymMonthlyCollections,
+            'taboc_gym_monthly_revenue' => $tabocGymRevenue ?? $tabocGymMonthlyCollections,
+        ];
+
+        $collectionSourceData = $this->getCollectionSourceData(
+            $year,
+            (int) ($month ?? now()->month)
+        );
+
+        if ($request->boolean('revenue_only')) {
+            return response()->json([
+                'basic_stats' => $revenueStats,
+                'collection_sources' => $collectionSourceData['collection_sources'],
+            ]);
+        }
+
+        $totalStalls = Stalls::count();
+        $rentedStalls = Stalls::where('status', 'occupied')->count();
+        $availableStalls = Stalls::where('status', 'vacant')->count();
+        $vendorCount = VendorDetails::where('status', 'active')->count();
+        $todayExpectedCollection = $this->calculateExpectedCollection('daily');
+        $monthlyExpectedCollection = $this->calculateExpectedCollection('monthly');
         
         // Get available years from payments
         $availableYears = Payments::selectRaw('YEAR(payment_date) as year')
@@ -323,16 +208,19 @@ public function display(Request $request)
         }
         
         // Section statistics based on stalls
-        $sectionStats = Sections::with(['stalls' => function($query) {
-            $query->select('id', 'section_id', 'status');
-        }])
+        $sectionStats = Sections::query()
         ->select('id', 'name')
+        ->withCount([
+            'stalls as total_stalls',
+            'stalls as rented_stalls' => fn ($query) => $query->where('status', 'occupied'),
+            'stalls as available_stalls' => fn ($query) => $query->where('status', 'vacant'),
+        ])
         ->get()
         ->map(function ($section) {
-            $totalStalls = $section->stalls->count();
-            $occupiedStalls = $section->stalls->where('status', 'occupied')->count();
-            $vacantStalls = $section->stalls->where('status', 'vacant')->count();
-            $otherStalls = $totalStalls - $occupiedStalls - $vacantStalls;
+            $totalStalls = (int) $section->total_stalls;
+            $occupiedStalls = (int) $section->rented_stalls;
+            $vacantStalls = (int) $section->available_stalls;
+            $otherStalls = max(0, $totalStalls - $occupiedStalls - $vacantStalls);
             
             return [
                 'id' => $section->id,
@@ -346,25 +234,51 @@ public function display(Request $request)
         });
         
         // Department income and targets
-        $departmentIncome = Department::with(['currentYearTarget'])
+        $departmentIncome = Department::query()
+        ->select('id', 'name', 'code')
+        ->with(['targets' => function ($query) use ($year) {
+            $query->select(
+                'id',
+                'department_id',
+                'annual_target',
+                'year',
+                'january_collection',
+                'february_collection',
+                'march_collection',
+                'april_collection',
+                'may_collection',
+                'june_collection',
+                'july_collection',
+                'august_collection',
+                'september_collection',
+                'october_collection',
+                'november_collection',
+                'december_collection'
+            )->where('year', $year);
+        }])
         ->where('is_active', true)
         ->get()
-        ->map(function ($department) use ($year) {
-            $target = $department->currentYearTarget;
+        ->map(function ($department) use ($year, $collectionSourceData) {
+            $target = $department->targets->first();
             $currentYearCollection = 0;
-            
-            if ($target) {
-                // Get current month to calculate total collection for current year
-                $currentMonth = strtolower(date('F'));
-                $months = ['january', 'february', 'march', 'april', 'may', 'june', 
-                          'july', 'august', 'september', 'october', 'november', 'december'];
-                
-                foreach ($months as $month) {
-                    $collectionField = $month . '_collection';
-                    $currentYearCollection += $target->$collectionField ?? 0;
-                    
-                    // Stop at current month
-                    if ($month === $currentMonth) break;
+            $departmentCode = preg_replace('/[^A-Z]/', '', strtoupper((string) $department->code));
+            $automaticCode = match ($departmentCode) {
+                'MARKET' => 'MARKET',
+                'WHARF' => 'WHARF',
+                'SLAUGHTER', 'SLAUGHTERHOUSE' => 'SLAUGHTER',
+                default => null,
+            };
+
+            if ($automaticCode && isset($collectionSourceData['automatic_collections'][$automaticCode])) {
+                $currentYearCollection = array_sum(
+                    $collectionSourceData['automatic_collections'][$automaticCode]
+                );
+            } elseif ($target) {
+                $months = ['january', 'february', 'march', 'april', 'may', 'june',
+                    'july', 'august', 'september', 'october', 'november', 'december'];
+
+                foreach ($months as $monthName) {
+                    $currentYearCollection += $target->{$monthName . '_collection'} ?? 0;
                 }
             }
             
@@ -383,7 +297,12 @@ public function display(Request $request)
             return [
                 'id' => $department->id,
                 'name' => $department->name,
-                'code' => $department->code,
+                'collection_source' => match ($automaticCode) {
+                    'MARKET' => 'Payments and Market cash tickets',
+                    'WHARF' => 'Wharf cash tickets',
+                    'SLAUGHTER' => 'Slaughterhouse collection items',
+                    default => 'Department monthly collections',
+                },
                 'annual_target' => $target?->annual_target ?? 0,
                 'annual_target_formatted' => $annualTargetFormatted,
                 'current_year_collection' => $currentYearCollection,
@@ -400,33 +319,37 @@ public function display(Request $request)
         $totalCollectedThisYear = Payments::whereYear('payment_date', $year)->sum('amount');
         
         // Calculate remaining balance - if remaining_balance is null or 0, use missed_days * daily_rent
-        $rentals = Rented::all();
-        $totalRemainingBalance = 0;
+        $totalRemainingBalance = (float) Rented::query()
+            ->selectRaw('COALESCE(SUM(CASE WHEN remaining_balance > 0 THEN remaining_balance ELSE COALESCE(missed_days, 0) * COALESCE(daily_rent, 0) END), 0) AS total')
+            ->value('total');
         
-        foreach ($rentals as $rental) {
-            if ($rental->remaining_balance && $rental->remaining_balance > 0) {
-                $totalRemainingBalance += $rental->remaining_balance;
-            } else {
-                // Use missed_days * daily_rent if remaining_balance is null or 0
-                $totalRemainingBalance += ($rental->missed_days ?? 0) * ($rental->daily_rent ?? 0);
-            }
-        }
-        
-        $totalCollectedAllTime = Payments::sum('amount');
-        $previousYearCollected = Payments::whereYear('payment_date', $year - 1)->sum('amount');
+        $totalCollectedThisYear = $collectionSourceData['total_collected_this_year'];
+        $previousYearCollected = $collectionSourceData['previous_year_collected'];
+        $totalCollectedAllTime = (float) Payments::sum('amount')
+            + (float) CashTicketsPayment::whereHas('cashTicket', function ($query) {
+                $query->whereIn('enterprise', ['Market', 'Wharf']);
+            })->sum('amount_paid')
+            + (float) DB::table('slaughterhouse_collections')
+                ->join('slaughterhouse_collection_items', function ($join) {
+                    $join->on(
+                        'slaughterhouse_collections.id',
+                        '=',
+                        'slaughterhouse_collection_items.slaughterhouse_collection_id'
+                    )->whereNull('slaughterhouse_collection_items.deleted_at');
+                })
+                ->whereNull('slaughterhouse_collections.deleted_at')
+                ->sum('slaughterhouse_collection_items.total_amount');
         $yearOverYearGrowth = $previousYearCollected > 0 
             ? (($totalCollectedThisYear - $previousYearCollected) / $previousYearCollected) * 100 
             : 0;
+        $monthlyCollectionTrend = $collectionSourceData['monthly_collection_trend'];
         
         $financialSummary = [
-            'total_collected_this_year' => $totalCollectedThisYear,
             'total_collected_this_year_formatted' => number_format($totalCollectedThisYear, 2, '.', ','),
             'total_remaining_balance' => $totalRemainingBalance,
-            'total_remaining_balance_formatted' => number_format($totalRemainingBalance, 2, '.', ','),
-            'total_collected_all_time' => $totalCollectedAllTime,
             'total_collected_all_time_formatted' => number_format($totalCollectedAllTime, 2, '.', ','),
             'year_over_year_growth' => $yearOverYearGrowth,
-            'previous_year_collected' => $previousYearCollected,
+            'year_over_year_change' => $totalCollectedThisYear - $previousYearCollected,
             'previous_year_collected_formatted' => number_format($previousYearCollected, 2, '.', ','),
         ];
         
@@ -434,28 +357,14 @@ public function display(Request $request)
             'basic_stats' => [
                 'rentedStalls' => $rentedStalls,
                 'availableStalls' => $availableStalls,
+                'totalStalls' => $totalStalls,
                 'vendors' => $vendorCount,
-                'incharges' => $inchargeCount,
-                'meat' => $meatCount,
-                'main' => $mainCount,
                 'today_expected_collection' => $todayExpectedCollection,
                 'monthly_expected_collection' => $monthlyExpectedCollection,
-                'market_daily_collection' => $marketCollections,
-                'market_monthly_collection' => $marketMonthlyCollections,
-                'market_monthly_revenue' => $marketRevenue ?? $marketMonthlyCollections,
-                'open_space_daily_collection' => $openSpaceCollections,
-                'open_space_monthly_collection' => $openSpaceMonthlyCollections,
-                'open_space_monthly_revenue' => $openSpaceRevenue ?? $openSpaceMonthlyCollections,
-                'taboc_gym_daily_collection' => $tabocGymCollections,
-                'taboc_gym_monthly_collection' => $tabocGymMonthlyCollections,
-                'taboc_gym_monthly_revenue' => $tabocGymRevenue ?? $tabocGymMonthlyCollections,
+                ...$revenueStats,
                 'collection_comparison' => [
                     'market_daily_vs_expected' => $todayExpectedCollection > 0 ? 
                         round(($marketCollections / $todayExpectedCollection) * 100, 2) : 0,
-                    'open_space_daily_vs_expected' => $openSpaceCollections > 0 ? 
-                        round(($openSpaceCollections / $openSpaceCollections) * 100, 2) : 0,
-                    'taboc_gym_daily_vs_expected' => $tabocGymCollections > 0 ? 
-                        round(($tabocGymCollections / $tabocGymCollections) * 100, 2) : 0,
                 ],
                 'top_performer' => $this->getTopPerformer($marketCollections, $openSpaceCollections, $tabocGymCollections),
             ],
@@ -463,7 +372,187 @@ public function display(Request $request)
             'department_income' => $departmentIncome,
             'financial_summary' => $financialSummary,
             'available_years' => $availableYears,
+            'monthly_collection_trend' => $monthlyCollectionTrend,
+            'collection_sources' => $collectionSourceData['collection_sources'],
         ]);
+}
+
+private function getCollectionSourceData(int $year, int $month): array
+{
+    $startDate = Carbon::create($year - 1, 1, 1)->startOfDay();
+    $endDate = Carbon::create($year, 12, 31)->endOfDay();
+    $monthlyTotals = [];
+
+    foreach ([$year - 1, $year] as $collectionYear) {
+        $monthlyTotals[$collectionYear] = [
+            'market_payments' => array_fill(1, 12, 0.0),
+            'market_tickets' => array_fill(1, 12, 0.0),
+            'wharf_tickets' => array_fill(1, 12, 0.0),
+            'slaughter' => array_fill(1, 12, 0.0),
+        ];
+    }
+
+    $storeMonthlyRows = function ($rows, string $source) use (&$monthlyTotals) {
+        foreach ($rows as $row) {
+            $rowYear = (int) $row->collection_year;
+            $rowMonth = (int) $row->collection_month;
+            if (isset($monthlyTotals[$rowYear][$source][$rowMonth])) {
+                $monthlyTotals[$rowYear][$source][$rowMonth] = (float) $row->total_amount;
+            }
+        }
+    };
+
+    $storeMonthlyRows(
+        Payments::query()
+            ->whereBetween('payment_date', [$startDate, $endDate])
+            ->selectRaw('YEAR(payment_date) AS collection_year, MONTH(payment_date) AS collection_month, SUM(amount) AS total_amount')
+            ->groupByRaw('YEAR(payment_date), MONTH(payment_date)')
+            ->get(),
+        'market_payments'
+    );
+
+    foreach (['Market' => 'market_tickets', 'Wharf' => 'wharf_tickets'] as $enterprise => $source) {
+        $storeMonthlyRows(
+            CashTicketsPayment::query()
+                ->whereBetween('payment_date', [$startDate->toDateString(), $endDate->toDateString()])
+                ->whereHas('cashTicket', function ($query) use ($enterprise) {
+                    $query->where('enterprise', $enterprise);
+                })
+                ->selectRaw('YEAR(payment_date) AS collection_year, MONTH(payment_date) AS collection_month, SUM(amount_paid) AS total_amount')
+                ->groupByRaw('YEAR(payment_date), MONTH(payment_date)')
+                ->get(),
+            $source
+        );
+    }
+
+    $storeMonthlyRows(
+        SlaughterhouseCollection::query()
+            ->whereBetween('collection_date', [$startDate->toDateString(), $endDate->toDateString()])
+            ->selectRaw('YEAR(collection_date) AS collection_year, MONTH(collection_date) AS collection_month, SUM(slaughterhouse_collection_items.total_amount) AS total_amount')
+            ->join('slaughterhouse_collection_items', function ($join) {
+                $join->on(
+                    'slaughterhouse_collections.id',
+                    '=',
+                    'slaughterhouse_collection_items.slaughterhouse_collection_id'
+                )->whereNull('slaughterhouse_collection_items.deleted_at');
+            })
+            ->whereNull('slaughterhouse_collections.deleted_at')
+            ->groupByRaw('YEAR(collection_date), MONTH(collection_date)')
+            ->get(),
+        'slaughter'
+    );
+
+    $monthlyCollectionTrend = collect(range(1, 12))->map(function ($monthNumber) use ($year, $monthlyTotals) {
+        return [
+            'month' => Carbon::create($year, $monthNumber, 1)->format('M'),
+            'market' => $monthlyTotals[$year]['market_payments'][$monthNumber]
+                + $monthlyTotals[$year]['market_tickets'][$monthNumber],
+            'wharf' => $monthlyTotals[$year]['wharf_tickets'][$monthNumber],
+            'slaughter' => $monthlyTotals[$year]['slaughter'][$monthNumber],
+        ];
+    });
+
+    $monthlySourceTotals = function (int $collectionYear) use ($monthlyTotals): array {
+        return [
+            'market' => array_sum($monthlyTotals[$collectionYear]['market_payments'])
+                + array_sum($monthlyTotals[$collectionYear]['market_tickets']),
+            'wharf' => array_sum($monthlyTotals[$collectionYear]['wharf_tickets']),
+            'slaughter' => array_sum($monthlyTotals[$collectionYear]['slaughter']),
+        ];
+    };
+
+    $selectedMonthTotals = [
+        'market' => $monthlyTotals[$year]['market_payments'][$month]
+            + $monthlyTotals[$year]['market_tickets'][$month],
+        'wharf' => $monthlyTotals[$year]['wharf_tickets'][$month],
+        'slaughter' => $monthlyTotals[$year]['slaughter'][$month],
+    ];
+    $yearTotals = $monthlySourceTotals($year);
+    $previousYearTotals = $monthlySourceTotals($year - 1);
+    $automaticCollections = [
+        'MARKET' => array_fill(1, 12, 0.0),
+        'WHARF' => $monthlyTotals[$year]['wharf_tickets'],
+        'SLAUGHTER' => $monthlyTotals[$year]['slaughter'],
+    ];
+
+    foreach (range(1, 12) as $monthNumber) {
+        $automaticCollections['MARKET'][$monthNumber] =
+            $monthlyTotals[$year]['market_payments'][$monthNumber]
+            + $monthlyTotals[$year]['market_tickets'][$monthNumber];
+    }
+        $periodSourceTotals = function (int $collectionYear) use ($monthlyTotals, $month): array {
+            $sumThroughMonth = function (array $values) use ($month): float {
+                return array_sum(array_slice($values, 1, $month, true));
+            };
+
+            return [
+                'market' => $sumThroughMonth($monthlyTotals[$collectionYear]['market_payments'])
+                    + $sumThroughMonth($monthlyTotals[$collectionYear]['market_tickets']),
+                'wharf' => $sumThroughMonth($monthlyTotals[$collectionYear]['wharf_tickets']),
+                'slaughter' => $sumThroughMonth($monthlyTotals[$collectionYear]['slaughter']),
+            ];
+        };
+        $currentPeriodTotals = $periodSourceTotals($year);
+        $previousPeriodTotals = $periodSourceTotals($year - 1);
+        $currentPeriodTotal = array_sum($currentPeriodTotals);
+        $previousPeriodTotal = array_sum($previousPeriodTotals);
+        $yearOverYearChange = array_sum($yearTotals) - array_sum($previousYearTotals);
+
+    return [
+        'collection_sources' => [
+            'month' => Carbon::create($year, $month, 1)->format('F'),
+            ...$selectedMonthTotals,
+            'comparison' => [
+                'period' => 'Jan-' . Carbon::create($year, $month, 1)->format('M'),
+                'current_total' => $currentPeriodTotal,
+                'previous_total' => $previousPeriodTotal,
+                'change' => $currentPeriodTotal - $previousPeriodTotal,
+                'current_year' => $year,
+                'previous_year' => $year - 1,
+            ],
+        ],
+        'monthly_collection_trend' => $monthlyCollectionTrend,
+        'total_collected_this_year' => array_sum($yearTotals),
+        'previous_year_collected' => array_sum($previousYearTotals),
+        'year_over_year_change' => $yearOverYearChange,
+        'automatic_collections' => $automaticCollections,
+    ];
+}
+
+private function getCollectionSourcesForMonth(int $year, int $month): array
+{
+    $startDate = Carbon::create($year, $month, 1)->startOfMonth();
+    $endDate = $startDate->copy()->endOfMonth();
+
+    $marketPayments = Payments::query()
+        ->whereBetween('payment_date', [$startDate, $endDate])
+        ->sum('amount');
+
+    $marketTickets = CashTicketsPayment::query()
+        ->whereBetween('payment_date', [$startDate->toDateString(), $endDate->toDateString()])
+        ->whereHas('cashTicket', fn ($query) => $query->where('enterprise', 'Market'))
+        ->sum('amount_paid');
+
+    $wharfTickets = CashTicketsPayment::query()
+        ->whereBetween('payment_date', [$startDate->toDateString(), $endDate->toDateString()])
+        ->whereHas('cashTicket', fn ($query) => $query->where('enterprise', 'Wharf'))
+        ->sum('amount_paid');
+
+    $slaughterCollections = DB::table('slaughterhouse_collections as collections')
+        ->join('slaughterhouse_collection_items as items', function ($join) {
+            $join->on('collections.id', '=', 'items.slaughterhouse_collection_id')
+                ->whereNull('items.deleted_at');
+        })
+        ->whereNull('collections.deleted_at')
+        ->whereBetween('collections.collection_date', [$startDate->toDateString(), $endDate->toDateString()])
+        ->sum('items.total_amount');
+
+    return [
+        'month' => $startDate->format('F'),
+        'market' => (float) $marketPayments + (float) $marketTickets,
+        'wharf' => (float) $wharfTickets,
+        'slaughter' => (float) $slaughterCollections,
+    ];
 }
     
     /**
@@ -886,13 +975,6 @@ public function display(Request $request)
             $tabocGymDaily = $this->calculateAreaCollections('Taboc Gym', 'daily');
             $tabocGymMonthly = $this->calculateAreaCollections('Taboc Gym', 'monthly');
 
-            // Get occupied stalls for detailed breakdown
-            $occupiedStalls = Stalls::with(['section.area', 'currentRental'])
-                ->whereHas('currentRental', function($query) {
-                    $query->whereIn('status', ['active', 'occupied', 'advance', 'temp_closed', 'partial', 'fully paid']);
-                })
-                ->get();
-
             // Prepare data for line graphs (12 months from Jan to Dec based on actual rental data)
             $monthlyTrend = [];
             $months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -923,11 +1005,8 @@ public function display(Request $request)
                 $monthNumber = $index + 1;
                 
                 // Calculate actual collections for this specific month based on rented stalls
-                $monthMarketDaily = $this->calculateAreaCollectionsForMonth('Market', 'daily', $monthNumber, $currentYear);
                 $monthMarketMonthly = $this->calculateAreaCollectionsForMonth('Market', 'monthly', $monthNumber, $currentYear);
-                $monthOpenSpaceDaily = $this->calculateAreaCollectionsForMonth('Open Space', 'daily', $monthNumber, $currentYear);
                 $monthOpenSpaceMonthly = $this->calculateAreaCollectionsForMonth('Open Space', 'monthly', $monthNumber, $currentYear);
-                $monthTabocGymDaily = $this->calculateAreaCollectionsForMonth('Taboc Gym', 'daily', $monthNumber, $currentYear);
                 $monthTabocGymMonthly = $this->calculateAreaCollectionsForMonth('Taboc Gym', 'monthly', $monthNumber, $currentYear);
                 
                 // Base factor on actual rental activity
@@ -948,118 +1027,53 @@ public function display(Request $request)
                 
                 $monthlyTrend[] = [
                     'month' => $monthName,
-                    'market_daily' => round($monthMarketDaily * $finalFactor, 2),
                     'market_monthly' => round($monthMarketMonthly * $finalFactor, 2),
-                    'open_space_daily' => round($monthOpenSpaceDaily * $finalFactor, 2),
                     'open_space_monthly' => round($monthOpenSpaceMonthly * $finalFactor, 2),
-                    'taboc_gym_daily' => round($monthTabocGymDaily * $finalFactor, 2),
                     'taboc_gym_monthly' => round($monthTabocGymMonthly * $finalFactor, 2),
                     'is_peak_month' => in_array($monthName, $peakMonths),
                     'rental_count' => $rentalCount
                 ];
             }
 
-            // Detailed breakdown by sections and stalls
-            $marketSections = [];
-            $openSpaceSections = [];
-            $tabocGymSections = [];
-            
-            foreach ($occupiedStalls as $stall) {
-                $areaName = strtolower($stall->section->area->name);
-                $sectionName = $stall->section->name;
-                $stallNumber = $stall->stall_number;
-                $rental = $stall->currentRental;
-                
-                $dailyRate = $rental->daily_rent ?? $stall->section->daily_rate ?? 0;
-                $monthlyRate = $rental->monthly_rent ?? $stall->section->monthly_rate ?? 0;
-                
-                $stallData = [
-                    'stall_number' => $stallNumber,
-                    'daily_rate' => $dailyRate,
-                    'monthly_rate' => $monthlyRate,
-                    'vendor_name' => $rental->vendor->name ?? 'Unknown',
-                    'status' => $rental->status,
-                ];
-                
-                // Check if this is a Taboc Gym section
-                $isTabocGymSection = str_contains(strtolower($sectionName), 'taboc') || str_contains(strtolower($sectionName), 'gym');
-                
-                if ($isTabocGymSection) {
-                    // Taboc Gym section
-                    if (!isset($tabocGymSections[$sectionName])) {
-                        // Get total stalls in this section
-                        $totalStallsInSection = Stalls::where('section_id', $stall->section->id)->count();
-                        
-                        $tabocGymSections[$sectionName] = [
-                            'section_name' => $sectionName,
-                            'area_name' => $stall->section->area->name,
-                            'total_daily' => 0,
-                            'total_monthly' => 0,
-                            'total_stalls' => $totalStallsInSection,
-                            'occupied_stalls' => 0,
-                            'available_stalls' => $totalStallsInSection,
-                            'stalls' => []
-                        ];
+            $sectionGroups = ['market' => [], 'open_space' => []];
+            $sections = Sections::query()
+                ->with('area:id,name')
+                ->withCount('stalls')
+                ->withCount([
+                    'stalls as occupied_stalls_count' => function ($query) {
+                        $query->whereHas('currentRental');
                     }
-                    
-                    $tabocGymSections[$sectionName]['total_daily'] += $dailyRate;
-                    $tabocGymSections[$sectionName]['total_monthly'] += $monthlyRate;
-                    $tabocGymSections[$sectionName]['occupied_stalls'] += 1;
-                    $tabocGymSections[$sectionName]['available_stalls'] = $tabocGymSections[$sectionName]['total_stalls'] - $tabocGymSections[$sectionName]['occupied_stalls'];
-                    $tabocGymSections[$sectionName]['stalls'][] = $stallData;
-                } elseif (in_array($areaName, ['wet', 'dry', 'wet area', 'dry area'])) {
-                    // Market area
-                    if (!isset($marketSections[$sectionName])) {
-                        // Get total stalls in this section
-                        $totalStallsInSection = Stalls::where('section_id', $stall->section->id)->count();
-                        
-                        $marketSections[$sectionName] = [
-                            'section_name' => $sectionName,
-                            'area_name' => $stall->section->area->name,
-                            'total_daily' => 0,
-                            'total_monthly' => 0,
-                            'total_stalls' => $totalStallsInSection,
-                            'occupied_stalls' => 0,
-                            'available_stalls' => $totalStallsInSection,
-                            'stalls' => []
-                        ];
-                    }
-                    
-                    $marketSections[$sectionName]['total_daily'] += $dailyRate;
-                    $marketSections[$sectionName]['total_monthly'] += $monthlyRate;
-                    $marketSections[$sectionName]['occupied_stalls'] += 1;
-                    $marketSections[$sectionName]['available_stalls'] = $marketSections[$sectionName]['total_stalls'] - $marketSections[$sectionName]['occupied_stalls'];
-                    $marketSections[$sectionName]['stalls'][] = $stallData;
-                } else {
-                    // Open Space area (excluding Taboc Gym)
-                    if (!isset($openSpaceSections[$sectionName])) {
-                        // Get total stalls in this section
-                        $totalStallsInSection = Stalls::where('section_id', $stall->section->id)->count();
-                        
-                        $openSpaceSections[$sectionName] = [
-                            'section_name' => $sectionName,
-                            'area_name' => $stall->section->area->name,
-                            'total_daily' => 0,
-                            'total_monthly' => 0,
-                            'total_stalls' => $totalStallsInSection,
-                            'occupied_stalls' => 0,
-                            'available_stalls' => $totalStallsInSection,
-                            'stalls' => []
-                        ];
-                    }
-                    
-                    $openSpaceSections[$sectionName]['total_daily'] += $dailyRate;
-                    $openSpaceSections[$sectionName]['total_monthly'] += $monthlyRate;
-                    $openSpaceSections[$sectionName]['occupied_stalls'] += 1;
-                    $openSpaceSections[$sectionName]['available_stalls'] = $openSpaceSections[$sectionName]['total_stalls'] - $openSpaceSections[$sectionName]['occupied_stalls'];
-                    $openSpaceSections[$sectionName]['stalls'][] = $stallData;
+                ])
+                ->get(['id', 'name', 'area_id']);
+
+            foreach ($sections as $section) {
+                $area = $section->area;
+                if (!$section || !$area) {
+                    continue;
+                }
+
+                $sectionName = $section->name;
+                $areaName = strtolower($area->name);
+                if (str_contains(strtolower($sectionName), 'taboc') || str_contains(strtolower($sectionName), 'gym')) {
+                    continue;
+                }
+
+                $group = in_array($areaName, ['wet', 'dry', 'wet area', 'dry area']) ? 'market' : 'open_space';
+                if (!isset($sectionGroups[$group][$section->id])) {
+                    $totalStalls = (int) $section->stalls_count;
+                    $occupiedStallCount = (int) $section->occupied_stalls_count;
+                    $sectionGroups[$group][$section->id] = [
+                        'section_name' => $sectionName,
+                        'area_name' => $area->name,
+                        'total_stalls' => $totalStalls,
+                        'occupied_stalls' => $occupiedStallCount,
+                        'available_stalls' => max(0, $totalStalls - $occupiedStallCount),
+                    ];
                 }
             }
-            
-            // Convert to indexed arrays for JSON response
-            $marketSections = array_values($marketSections);
-            $openSpaceSections = array_values($openSpaceSections);
-            $tabocGymSections = array_values($tabocGymSections);
+
+            $marketSections = array_values($sectionGroups['market']);
+            $openSpaceSections = array_values($sectionGroups['open_space']);
 
             return response()->json([
                 'status' => 'success',
@@ -1075,17 +1089,6 @@ public function display(Request $request)
                     'monthly_trend' => $monthlyTrend,
                     'market_sections' => $marketSections,
                     'open_space_sections' => $openSpaceSections,
-                    'taboc_gym_sections' => $tabocGymSections,
-                    'comparison' => [
-                        'total_daily' => $marketDaily + $openSpaceDaily + $tabocGymDaily,
-                        'total_monthly' => $marketMonthly + $openSpaceMonthly + $tabocGymMonthly,
-                        'market_percentage' => ($marketDaily + $openSpaceDaily + $tabocGymDaily) > 0 ? 
-                            round(($marketDaily / ($marketDaily + $openSpaceDaily + $tabocGymDaily)) * 100, 2) : 0,
-                        'open_space_percentage' => ($marketDaily + $openSpaceDaily + $tabocGymDaily) > 0 ? 
-                            round(($openSpaceDaily / ($marketDaily + $openSpaceDaily + $tabocGymDaily)) * 100, 2) : 0,
-                        'taboc_gym_percentage' => ($marketDaily + $openSpaceDaily + $tabocGymDaily) > 0 ? 
-                            round(($tabocGymDaily / ($marketDaily + $openSpaceDaily + $tabocGymDaily)) * 100, 2) : 0
-                    ]
                 ]
             ]);
         } catch (\Exception $e) {
@@ -1096,175 +1099,7 @@ public function display(Request $request)
         }
     }
 
-    public function slaughterReport(Request $request)
-{
-    $startDate = $request->query('start_date');
-    $endDate = $request->query('end_date');
-
-    $payments = SlaughterPayment::with([
-            'animal',
-            'customer',
-            'collector',
-            'inspector',
-            'remittanceables.remittance.receivedBy',
-        ])
-        ->where('status', 'remitted')
-        ->where('is_remitted', 1)
-        ->when($startDate && $endDate, function ($query) use ($startDate, $endDate) {
-            $query->whereBetween('payment_date', [$startDate, $endDate]);
-        })
-        ->orderBy('payment_date', 'desc')
-        ->get();
-
-    $entries = [];
-    foreach ($payments as $payment) {
-        $mainCollector = optional($payment->remittanceables->first()?->remittance?->receivedBy)->fullname;
-
-        $entries[] = [
-            'animal_type' => optional($payment->animal)->animal_type ?? 'N/A',
-            'customer_name' => optional($payment->customer)->fullname ?? 'N/A',
-            'payment_date' => Carbon::parse($payment->payment_date)->timezone('Asia/Manila'),
-            'collector' => optional($payment->collector)->fullname ?? 'N/A',
-            'inspector' => optional($payment->inspector)->fullname ?? 'N/A',
-            'received_by' => $mainCollector ?? 'N/A',
-            'amount' => (float) $payment->total_amount,
-            'breakdown' => [
-                'slaughter_fee' => $payment->slaughter_fee,
-                'ante_mortem' => $payment->ante_mortem,
-                'post_mortem' => $payment->post_mortem,
-                'coral_fee' => $payment->coral_fee,
-                'permit_to_slh' => $payment->permit_to_slh,
-                'quantity' => $payment->quantity,
-                'total_kilos' => $payment->total_kilos,
-                'per_kilos' => $payment->per_kilos,
-            ],
-        ];
-    }
-
-    // Group and format same as before
-    $grouped = [];
-    foreach ($entries as $entry) {
-        $monthName = $entry['payment_date']->format('F');
-        $dayKey = $entry['payment_date']->format('Y-m-d');
-        $dayLabel = '(' . strtoupper($entry['payment_date']->format('D')) . ') ' . $entry['payment_date']->format('M j');
-
-        if (!isset($grouped[$monthName])) $grouped[$monthName] = [];
-        if (!isset($grouped[$monthName][$dayKey])) {
-            $grouped[$monthName][$dayKey] = [
-                'day_label' => $dayLabel,
-                'total_amount' => 0,
-                'details' => [],
-            ];
-        }
-
-        $grouped[$monthName][$dayKey]['total_amount'] += $entry['amount'];
-        $grouped[$monthName][$dayKey]['details'][] = $entry;
-    }
-
-    $finalData = [];
-    foreach ($grouped as $monthName => $days) {
-        $finalData[] = [
-            'month' => $monthName,
-            'days' => array_values($days),
-        ];
-    }
-
-    return response()->json([
-        'start_date' => $startDate,
-        'end_date' => $endDate,
-        'months' => $finalData,
-    ]);
-}
-
-
-public function slaughterRemittance(Request $request)
-{
-    $startDate = $request->query('start_date');
-    $endDate = $request->query('end_date');
-
-    $payments = SlaughterPayment::with([
-        'animal',
-        'customer',
-        'collector',
-        'inspector',
-        'remittanceables.remittance.receivedBy',
-    ])
-    ->where('status', 'remitted')
-    ->where('is_remitted', 1)
-    ->when($startDate && $endDate, function ($query) use ($startDate, $endDate) {
-        $query->whereDate('payment_date', '>=', $startDate)
-              ->whereDate('payment_date', '<=', $endDate);
-    })
-    ->orderBy('payment_date', 'desc')
-    ->get();
-
-    $entries = [];
-    foreach ($payments as $payment) {
-        $mainCollector = optional($payment->remittanceables->first()?->remittance?->receivedBy)->fullname ?? 'N/A';
-
-        $entries[] = [
-            'animal_type' => optional($payment->animal)->animal_type ?? 'N/A',
-            'customer_name' => optional($payment->customer)->fullname ?? 'N/A',
-            'payment_date' => optional($payment->payment_date)
-                                ? Carbon::parse($payment->payment_date)
-                                    ->timezone('Asia/Manila')
-                                    ->toDateTimeString()
-                                : null,
-            'collector' => optional($payment->collector)->fullname ?? 'N/A',
-            'inspector' => optional($payment->inspector)->fullname ?? 'N/A',
-            'received_by' => $mainCollector,
-            'amount' => (float) $payment->total_amount,
-            'breakdown' => [
-                'slaughter_fee' => $payment->slaughter_fee,
-                'ante_mortem' => $payment->ante_mortem,
-                'post_mortem' => $payment->post_mortem,
-                'coral_fee' => $payment->coral_fee,
-                'permit_to_slh' => $payment->permit_to_slh,
-                'quantity' => $payment->quantity,
-                'total_kilos' => $payment->total_kilos,
-                'per_kilos' => is_array($payment->per_kilos) ? $payment->per_kilos : [$payment->per_kilos],
-            ],
-        ];
-    }
-
-    // Group by month -> day
-    $grouped = [];
-    foreach ($entries as $entry) {
-        $paymentDate = Carbon::parse($entry['payment_date'])->timezone('Asia/Manila');
-        $monthName = $paymentDate->format('F');
-        $dayKey = $paymentDate->format('Y-m-d');
-        $dayLabel = '(' . strtoupper($paymentDate->format('D')) . ') ' . $paymentDate->format('M j');
-
-        if (!isset($grouped[$monthName])) $grouped[$monthName] = [];
-        if (!isset($grouped[$monthName][$dayKey])) {
-            $grouped[$monthName][$dayKey] = [
-                'day_label' => $dayLabel,
-                'total_amount' => 0,
-                'details' => [],
-            ];
-        }
-
-        $grouped[$monthName][$dayKey]['total_amount'] += $entry['amount'];
-        $grouped[$monthName][$dayKey]['details'][] = $entry;
-    }
-
-    // Ensure months are ordered
-    $monthOrder = ['January','February','March','April','May','June','July','August','September','October','November','December'];
-    $finalData = [];
-    foreach ($monthOrder as $monthName) {
-        if (!isset($grouped[$monthName])) continue;
-        $finalData[] = [
-            'month' => $monthName,
-            'days' => array_values($grouped[$monthName]),
-        ];
-    }
-
-    return response()->json([
-        'start_date' => $startDate,
-        'end_date' => $endDate,
-        'months' => $finalData,
-    ]);
-}
+ 
 
 
 
@@ -1558,11 +1393,8 @@ public function vendorsWithMissedPayments()
 
             if ($totalMissed === 0) return null;
 
-            // ✅ Get the latest "Missed Payment" notification
-            $lastNotification = Notification::where('vendor_id', $vendor->id)
-                ->where('title', 'Missed Payment')
-                ->latest('created_at')
-                ->first();
+          
+           
 
             return [
                 'vendor_id'          => $vendor->id,
@@ -1570,8 +1402,7 @@ public function vendorsWithMissedPayments()
                 'contact_number'     => $vendor->contact_number,
                 'stalls'             => $stalls,
                 'days_missed'        => $totalMissed,
-                'last_notified_date' => $lastNotification ? $lastNotification->created_at->toDateString() : null,
-            ];
+                           ];
         })
         ->filter()
         ->values();
@@ -1639,31 +1470,13 @@ public function notifyVendor(Request $request)
             $stallNumber = optional($rented->stall)->stall_number ?? 'Unknown';
 
             // ✅ Avoid duplicate notification for same stall & day
-            $alreadyNotifiedToday = Notification::where('vendor_id', $vendorId)
-                ->where('title', 'Missed Payment')
-                ->where('message', 'like', "%Stall #{$stallNumber}%")
-                ->whereDate('created_at', $today)
-                ->exists();
+           
 
-            if (!$alreadyNotifiedToday) {
-                $notification = Notification::create([
-                    'vendor_id' => $vendorId,
-                    'title'     => 'Missed Payment',
-                    'message'   => "You have missed {$missedDays} payment(s) for Stall #{$stallNumber}. Please settle as soon as possible.",
-                    'is_read'   => 0,
-                ]);
-
-                $notifications[] = $notification;
-            }
+       
         }
     }
 
-    if (empty($notifications)) {
-        return response()->json([
-            'status' => 'info',
-            'message' => 'No new missed payments found or vendor already notified today.',
-        ]);
-    }
+ 
 
     return response()->json([
         'status' => 'success',
@@ -1688,25 +1501,16 @@ public function vendornotification(Request $request)
 
     $today = now()->startOfDay();
 
-    // ✅ Create daily notification even if no payment exists
-    $exists = Notification::where('vendor_id', $vendorId)
-        ->where('title', 'Missed Payment')
-        ->whereDate('created_at', $today)
-        ->exists();
+  
+
+  
 
 
-
-    // Fetch all notifications
-    $notifications = Notification::where('vendor_id', $vendorId)
-        ->orderBy('created_at', 'desc')
-        ->get();
-
-    $unreadCount = $notifications->where('is_read', 0)->count();
 
     return response()->json([
         'status' => 'success',
-        'notifications' => $notifications,
-        'unread_count' => $unreadCount,
+
+      
     ]);
 }
 
@@ -1726,16 +1530,10 @@ public function vendornotification(Request $request)
             ], 404);
         }
 
-        $notification = Notification::where('vendor_id', $vendorId)
-            ->where('id', $id)
-            ->firstOrFail();
-
-        $notification->update(['is_read' => 1]);
-
         return response()->json([
             'status' => 'success',
             'message' => 'Notification marked as read',
-            'notification' => $notification
+     
         ]);
     }
 
@@ -1799,19 +1597,16 @@ public function stallHistory($stallId)
     $vendorCount = VendorDetails::where('Status', 'pending')->count();
 
     // Count only pending main collectors
-    $mainCollectorCount = MainCollector::where('Status', 'pending')->count();
+
 
     // Count only pending incharge collectors
-    $inchargeCount = InchargeCollector::where('Status', 'pending')->count();
+
 
     // Count only pending meat inspectors
-    $meatInspectorCount = MeatInspector::where('Status', 'pending')->count();
+
 
     return response()->json([
         'vendorCount' => $vendorCount,
-        'mainCollectorCount' => $mainCollectorCount,
-        'inchargeCount' => $inchargeCount,
-        'meatInspectorCount' => $meatInspectorCount,
     ]);
 }
 
@@ -2025,19 +1820,6 @@ public function payMissedForRented(Request $request, $id)
             $stall->save();
         }
 
-        // Notify vendor that missed payments were fully settled
-        $stallNumber = $stall->stall_number ?? 'N/A';
-
-        Notification::create([
-            'vendor_id' => $vendor->id,
-            'title'     => 'Missed Payments Settled',
-            'message'   => "Your stall #{$stallNumber} missed payments ({$missedDays} day(s), ₱"
-                            . number_format($totalMissedAmount, 2)
-                            . ") have been fully paid." . ($advanceDays > 0
-                                ? " You also have {$advanceDays} advance day(s) until {$advanceUntil}."
-                                : " The stall is now reopened."),
-            'is_read'   => 0,
-        ]);
     } else {
         // Still missed days remaining (partial payment)
         $rented->missed_days       = $missedDaysAfter;

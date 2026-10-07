@@ -2,10 +2,12 @@
 
 namespace App\Models;
 
+
+use App\Models\Collection;
 use App\Models\Rented;
-use App\Models\Certificate;
-use Illuminate\Database\Eloquent\Model;
+use App\Models\VendorQrCode;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
 
 class VendorDetails extends Model
@@ -23,35 +25,29 @@ class VendorDetails extends Model
         'status',
     ];
 
-    // public function application()
-    // {
-    //     return $this->hasMany(Application::class, 'vendor_id');
-    // }
+   public function collections()
+{
+    return $this->hasMany(
+        Collection::class,
+        'vendor_id'
+    );
+}
 
-    // public function marketRegistrations()
-    // {
-    //     return $this->hasManyThrough(
-    //         MarketRegistration::class,
-    //         Application::class,
-    //         'vendor_id',        
-    //         'application_id',  
-    //         'id',              
-    //         'id'              
-    //     );
-    // }
+public function payments()
+{
+    return $this->hasMany(
+        Payments::class,
+        'vendor_id'
+    );
+}
 
-    public function certificates()
-    {
-        return $this->hasMany(Certificate::class, 'vendor_id');
-    }
-
-    public function activeCertificate()
-    {
-        return $this->hasOne(Certificate::class, 'vendor_id')
-                    ->where('status', 'active')
-                    ->latest();
-    }
-
+public function qrCode()
+{
+    return $this->hasOne(
+        VendorQrCode::class,
+        'vendor_id'
+    );
+}
     public function rented()
     {
         return $this->hasMany(Rented::class, 'vendor_id');
@@ -76,4 +72,6 @@ class VendorDetails extends Model
     {
         return $query->where('status', 'active');
     }
+
+    
 }

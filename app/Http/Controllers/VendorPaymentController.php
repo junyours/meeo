@@ -5,7 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\VendorDetails;
 use App\Models\Rented;
 use App\Models\Payments;
-use App\Models\Notification;
+use App\Models\StallRateHistory;
 use App\Services\StallRateHistoryService;
 use Illuminate\Http\Request;
 use Carbon\Carbon;
@@ -25,27 +25,104 @@ public function index()
 {
     $today = now();
     $currentYear = $today->year;
+    $yearStart = Carbon::create($currentYear, 1, 1)->startOfDay();
+    $yearEnd = Carbon::create($currentYear, 12, 31)->endOfDay();
 
-    $vendors = VendorDetails::with([
-            'rented.stall.section',
-            'rented.payments'
+    $vendors = VendorDetails::query()
+        ->select('id', 'first_name', 'last_name', 'contact_number', 'status')
+        ->with([
+            'rented' => function ($rentalQuery) use ($yearStart, $yearEnd) {
+                $rentalQuery->select(
+                    'id',
+                    'vendor_id',
+                    'stall_id',
+                    'status',
+                    'daily_rent',
+                    'monthly_rent',
+                    'missed_days',
+                    'remaining_balance',
+                    'next_due_date',
+                    'created_at',
+                    'updated_at'
+                )->with([
+                    'stall' => function ($stallQuery) {
+                        $stallQuery->select(
+                            'id',
+                            'section_id',
+                            'stall_number',
+                            'status',
+                            'is_monthly',
+                            'daily_rate',
+                            'monthly_rate',
+                            'annual_rate'
+                        )->with(['section' => function ($sectionQuery) {
+                            $sectionQuery->select(
+                                'id',
+                                'name',
+                                'rate_type',
+                                'rate',
+                                'daily_rate',
+                                'monthly_rate'
+                            );
+                        }]);
+                    },
+                    'payments' => function ($paymentQuery) use ($yearStart, $yearEnd) {
+                        $paymentQuery->select(
+                            'id',
+                            'rented_id',
+                            'payment_date',
+                            'status',
+                            'amount'
+                        )->whereBetween('payment_date', [$yearStart, $yearEnd]);
+                    },
+                ]);
+            },
         ])
-        ->where('status', 'active')
+        ->where(function ($query) {
+            $query->where('status', 'active')
+                ->orWhereHas('rented', function ($rentalQuery) {
+                    $rentalQuery->where('status', 'unoccupied')
+                        ->where('remaining_balance', '>', 0);
+                });
+        })
         ->orderBy('first_name')
         ->get();
 
-    // Collect all unique stall IDs for bulk historical rate fetching
-    $allStallIds = $vendors->pluck('rented.stall.id')->filter()->unique()->values();
-    
-    // Fetch all historical rates for all stalls in bulk (OPTIMIZATION!)
+    $stalls = $vendors->flatMap(function ($vendor) {
+        return $vendor->rented->pluck('stall')->filter();
+    })->keyBy('id');
+    $allStallIds = $stalls->keys();
     $allHistoricalRates = [];
     if ($allStallIds->isNotEmpty()) {
-        foreach ($allStallIds as $stallId) {
+        $rateHistoryByStall = StallRateHistory::query()
+            ->whereIn('stall_id', $allStallIds)
+            ->whereDate('effective_from', '<=', $yearEnd->toDateString())
+            ->select('stall_id', 'daily_rate', 'monthly_rate', 'annual_rate', 'effective_from')
+            ->orderBy('stall_id')
+            ->orderBy('effective_from')
+            ->get()
+            ->groupBy('stall_id');
+
+        foreach ($stalls as $stallId => $stall) {
+            $histories = $rateHistoryByStall->get($stallId, collect())->values();
+            $historyIndex = 0;
+            $currentHistory = null;
+
             for ($month = 1; $month <= 12; $month++) {
+                $monthEnd = Carbon::create($currentYear, $month, 1)->endOfMonth()->toDateString();
+
+                while (
+                    $historyIndex < $histories->count()
+                    && $histories[$historyIndex]->effective_from->toDateString() <= $monthEnd
+                ) {
+                    $currentHistory = $histories[$historyIndex];
+                    $historyIndex++;
+                }
+
                 $allHistoricalRates[$stallId][$month] = [
-                    'daily' => $this->rateHistoryService->getDailyRateForMonth($stallId, $currentYear, $month),
-                    'monthly' => $this->rateHistoryService->getMonthlyRateForMonth($stallId, $currentYear, $month),
-                    'annual' => $this->rateHistoryService->getAnnualRateForMonth($stallId, $currentYear, $month),
+                    'daily' => $currentHistory?->daily_rate ?? $stall->daily_rate,
+                    'monthly' => $currentHistory?->monthly_rate ?? $stall->monthly_rate,
+                    'annual' => $currentHistory?->annual_rate ?? $stall->annual_rate,
                 ];
             }
         }
@@ -54,7 +131,15 @@ public function index()
     $data = $vendors->map(function ($vendor) use ($today, $currentYear, $allHistoricalRates) {
 
         $rentals = $vendor->rented->filter(function ($rental) {
-            return $rental->stall && $rental->stall->status !== 'vacant' && $rental->status !== 'unoccupied';
+            if (!$rental->stall) {
+                return false;
+            }
+
+            if ($rental->status === 'unoccupied') {
+                return (float) ($rental->remaining_balance ?? 0) > 0;
+            }
+
+            return $rental->stall->status !== 'vacant';
         });
 
         $mappedRentals = $rentals->map(function ($rental) use ($today, $currentYear, $allHistoricalRates) {
@@ -85,12 +170,15 @@ public function index()
                 ->isNotEmpty();
 
             // ✅ Remaining balance calculation
-            $remainingBalance = ($rental->remaining_balance !== null && $rental->remaining_balance > 0)
+            $isUnoccupied = $rental->status === 'unoccupied';
+                $remainingBalance = ($rental->remaining_balance !== null && $rental->remaining_balance > 0)
                 ? (float) $rental->remaining_balance
-                : ($missedDays * $dailyRent);
+                : ($missedDays * ($isMonthlyStall ? $monthlyRent : $dailyRent));
 
             // ✅ Calculate monthly balances for current year
-            $monthlyBalances = $this->calculateMonthlyBalancesForRentalOptimized($rental, $currentYear, $allHistoricalRates[$rental->stall->id] ?? []);
+            $monthlyBalances = $isUnoccupied
+                ? []
+                : $this->calculateMonthlyBalancesForRentalOptimized($rental, $currentYear, $allHistoricalRates[$rental->stall->id] ?? []);
 
             return [
                 'rental_id' => $rental->id,
@@ -99,10 +187,10 @@ public function index()
                 'daily_rent' => $isMonthlyStall ? 0 : $dailyRent, // Set daily rent to 0 for monthly stalls
                 'monthly_rent' => $isMonthlyStall ? ($monthlyRent ?: $rental->stall->monthly_rate) : $monthlyRent,
                 'status' => $rental->status,
-                'missed_days' => $isMonthlyStall ? 0 : $missedDays, // Set missed days to 0 for monthly stalls
-                'remaining_balance' => $isMonthlyStall ? 0 : $remainingBalance, // Set remaining balance to 0 for monthly stalls
-                'paid_today' => $paidToday,
-                'last_payment_date' => $rental->last_payment_date,
+                'is_unoccupied' => $isUnoccupied,
+                'missed_days' => $isMonthlyStall && !$isUnoccupied ? 0 : $missedDays,
+                'remaining_balance' => $remainingBalance,
+                'paid_today' => $isUnoccupied ? false : $paidToday,
                 'next_due_date' => $rental->next_due_date,
                 'monthly_balances' => $monthlyBalances,
                 'is_monthly' => $isMonthlyStall, // Add this flag for frontend
@@ -118,12 +206,11 @@ public function index()
             'id' => $vendor->id,
             'name' => $vendor->first_name . ' ' . $vendor->last_name,
             'contact_number' => $vendor->contact_number,
-            'email' => $vendor->email,
-            'total_stalls' => $mappedRentals->count(),
+            'status' => $vendor->status,
+            'total_stalls' => $mappedRentals->where('is_unoccupied', false)->count(),
             'rentals' => array_values($mappedRentals->toArray()),
             'total_remaining_balance' => $mappedRentals->sum('remaining_balance'),
-            'total_missed_days' => $mappedRentals->sum('missed_days'),
-            'paid_today_count' => $mappedRentals->where('paid_today', true)->count(),
+            'paid_today_count' => $mappedRentals->where('is_unoccupied', false)->where('paid_today', true)->count(),
             'monthly_balances' => $vendorMonthlyBalances,
         ];
     });
@@ -244,21 +331,6 @@ public function index()
             // Process payment using frontend advance days if provided
             $result = $this->processPaymentForRental($rental, $amount, $paymentType, $paymentDate, $frontendAdvanceDays, $orNumber);
             $results[] = $result;
-        }
-
-        // Send notification to vendor
-        $successfulPayments = collect($results)->where('success', true);
-        if ($successfulPayments->isNotEmpty()) {
-            $totalAmount = $successfulPayments->sum('amount');
-            $stallCount = $successfulPayments->count();
-            
-            Notification::create([
-                'vendor_id' => $vendor->id,
-                'title' => 'Bulk Payment Processed',
-                'message' => "Your bulk payment for {$stallCount} stall(s) totaling ₱" . 
-                            number_format($totalAmount, 2) . " with OR #{$orNumber} has been processed successfully.",
-                'is_read' => 0,
-            ]);
         }
 
         return response()->json([
@@ -850,61 +922,18 @@ public function index()
         $isLeapYear = ($year % 4 == 0 && ($year % 100 != 0 || $year % 400 == 0));
         $daysInMonths = [31, $isLeapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
         
-        // Check if stall is monthly
-        $isMonthlyStall = $rental->stall && $rental->stall->is_monthly;
-        
-        // Get all individual payments for this rental in the current year
-        $individualPayments = $rental->payments
+        // Group collected payments once; the response only needs one source ID per month.
+        $paymentsByMonth = $rental->payments
             ->where('status', 'collected')
             ->filter(function ($payment) use ($year) {
                 return \Carbon\Carbon::parse($payment->payment_date)->year == $year;
             })
-            ->map(function ($payment) use ($isMonthlyStall, $rental, $historicalRates, $daysInMonths) {
-                // Calculate monthly rate using pre-fetched historical rates
-                $paymentDate = \Carbon\Carbon::parse($payment->payment_date);
-                $targetMonth = $paymentDate->month;
-                $targetYear = $paymentDate->year;
-                
-                $monthlyRate = $this->calculateMonthlyRateForRentalInMonthOptimized($rental, $targetYear, $targetMonth, $daysInMonths[$targetMonth - 1], $historicalRates[$targetMonth] ?? []);
-                
-                $deposit = max(0, $payment->amount - $monthlyRate);
-                
-                return [
-                    'payment_id' => $payment->id,
-                    'or_number' => $payment->or_number,
-                    'payment_date' => $payment->payment_date,
-                    'amount' => $payment->amount,
-                    'monthly_rate' => (float) number_format($monthlyRate, 2, '.', ''),
-                    'deposit' => (float) number_format($deposit, 2, '.', ''),
-                    'month' => $paymentDate->format('M'),
-                    'month_index' => $targetMonth - 1,
-                ];
-            })
-            ->values();
-        
-        // Check which months have deposits based on total payments vs monthly rate
-        $monthsWithDeposits = [];
-        foreach ($months as $index => $month) {
-            $targetMonth = $index + 1;
-            
-            // Calculate monthly rate using pre-fetched historical rates
-            $monthlyRate = $this->calculateMonthlyRateForRentalInMonthOptimized($rental, $year, $targetMonth, $daysInMonths[$index], $historicalRates[$targetMonth] ?? []);
-            
-            // Get total payments for this month
-            $monthPayments = $rental->payments
-                ->where('status', 'collected')
-                ->filter(function ($payment) use ($year, $targetMonth) {
-                    $paymentDate = \Carbon\Carbon::parse($payment->payment_date);
-                    return $paymentDate->year == $year && $paymentDate->month == $targetMonth;
-                });
-            
-            $totalMonthlyPayment = $monthPayments->sum('amount');
-            $monthDeposit = max(0, $totalMonthlyPayment - $monthlyRate);
-            
-            if ($monthDeposit > 0) {
-                $monthsWithDeposits[] = $index;
-            }
-        }
+            ->groupBy(function ($payment) {
+                return \Carbon\Carbon::parse($payment->payment_date)->month - 1;
+            });
+        $paymentIdsByMonth = $paymentsByMonth->map(function ($monthPayments) {
+            return $monthPayments->first()->id;
+        });
         
         // Group by month for backward compatibility
         foreach ($months as $index => $month) {
@@ -913,13 +942,7 @@ public function index()
             // Calculate monthly rate using pre-fetched historical rates
             $monthlyRate = $this->calculateMonthlyRateForRentalInMonthOptimized($rental, $year, $targetMonth, $daysInMonths[$index], $historicalRates[$targetMonth] ?? []);
             
-            // Get total payments for this month
-            $monthPayments = $rental->payments
-                ->where('status', 'collected')
-                ->filter(function ($payment) use ($year, $targetMonth) {
-                    $paymentDate = \Carbon\Carbon::parse($payment->payment_date);
-                    return $paymentDate->year == $year && $paymentDate->month == $targetMonth;
-                });
+            $monthPayments = $paymentsByMonth->get($index, collect());
             
             $monthlyPayment = $monthPayments->sum('amount');
             
@@ -946,14 +969,7 @@ public function index()
                 'payment' => (float) $formattedPayment,
                 'balance' => (float) $formattedBalance,
                 'deposit' => (float) $formattedDeposit,
-                'payment_id' => null,
-                'or_number' => null,
-                'payment_date' => null,
-                'has_deposit' => in_array($index, $monthsWithDeposits),
-                'individual_payments' => in_array($index, $monthsWithDeposits) ? 
-                    $individualPayments->filter(function ($payment) use ($index) {
-                        return $payment['month_index'] == $index;
-                    })->values() : [],
+                'payment_id' => $paymentIdsByMonth[$index] ?? null,
             ];
         }
         
@@ -1603,24 +1619,7 @@ public function index()
             $results[] = $result;
         }
 
-        // Send notification to vendor
         $successfulPayments = collect($results)->where('success', true);
-        if ($successfulPayments->isNotEmpty()) {
-            $totalAmount = $successfulPayments->sum('total_balance_paid');
-            $monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-            $selectedMonthNames = collect($selectedMonths)->map(function($monthIndex) use ($monthNames) {
-                return $monthNames[$monthIndex] ?? '';
-            })->filter()->join(', ');
-            
-            Notification::create([
-                'vendor_id' => $vendor->id,
-                'title' => 'Selected Months Payment Processed',
-                'message' => "Your payment for months: {$selectedMonthNames} totaling ₱" . 
-                            number_format($totalAmount, 2) . " with OR #{$orNumber} has been processed successfully.",
-                'is_read' => 0,
-            ]);
-        }
-
         return response()->json([
             'success' => true,
             'message' => 'Selected months payment processing completed.',
@@ -1816,20 +1815,6 @@ public function index()
         // Calculate remaining deposit for response
         $remainingDeposit = $availableDeposit - $totalAmountNeeded;
         
-
-        // Send notification to vendor
-        $successfulPayments = collect($results)->where('success', true);
-        if ($successfulPayments->isNotEmpty()) {
-            $stallCount = $successfulPayments->count();
-            
-            Notification::create([
-                'vendor_id' => $vendor->id,
-                'title' => 'Deposit Consumed',
-                'message' => "Your deposit of ₱" . 
-                            number_format($totalAmountNeeded, 2) . " has been consumed for {$stallCount} stall(s) with OR #{$orNumber}.",
-                'is_read' => 0,
-            ]);
-        }
 
         return response()->json([
             'success' => true,

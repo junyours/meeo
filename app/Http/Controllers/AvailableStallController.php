@@ -9,22 +9,24 @@ class AvailableStallController extends Controller
 {
     public function index(): JsonResponse
     {
-        $sections = Sections::with([
-            'area:id,name',
-            'stalls' => function ($query) {
-                $query->select('id', 'section_id', 'stall_number', 'size')
-                    ->where('status', 'vacant')
-                    ->where('is_active', true)
-                    ->orderBy('stall_number');
-            },
-        ])->get();
+        $sections = Sections::query()
+            ->select('id', 'name', 'area_id')
+            ->with([
+                'area:id,name',
+                'stalls' => function ($query) {
+                    $query->select('id', 'section_id', 'stall_number')
+                        ->where('status', 'vacant')
+                        ->where('is_active', true)
+                        ->orderBy('stall_number');
+                },
+            ])->get();
 
         $availableSections = $sections
             ->map(function ($section) {
                 return [
                     'section_id' => $section->id,
                     'section_name' => $section->name,
-                    'area' => $section->area,
+                    'area' => ['name' => $section->area?->name],
                     'available_stalls_count' => $section->stalls->count(),
                     'available_stalls' => $section->stalls->values(),
                 ];

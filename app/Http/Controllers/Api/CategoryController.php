@@ -37,7 +37,10 @@ class CategoryController extends Controller
      */
     public function index()
     {
-        $categories = Category::with('products')->get();
+        $categories = Category::query()
+            ->select('id', 'name', 'description', 'color', 'icon', 'image')
+            ->orderBy('name')
+            ->get();
         return response()->json($categories);
     }
 

@@ -26,25 +26,61 @@ class StallController extends Controller
 
       public function removeVendor(Request $request, $stallId)
     {
+        $request->validate([
+            'settlement_amount' => 'nullable|numeric|min:0',
+            'unoccupied_date' => 'nullable|date',
+        ]);
+
         return DB::transaction(function () use ($request, $stallId) {
             // 1. Find the stall
-            $stall = Stalls::findOrFail($stallId);
+            $stall = Stalls::with('section')->findOrFail($stallId);
 
             // 2. Get the currently active rented record for this stall
             // Only get records that are currently active/occupied
-            $rented = Rented::where('stall_id', $stall->id)
+            $rented = Rented::with('payments')->where('stall_id', $stall->id)
                 ->whereIn('status', ['occupied', 'active', 'advance', 'temp_closed', 'partial', 'fully paid'])
                 ->orderBy('created_at', 'desc')
                 ->first();
+            $settlementAmount = 0;
 
             // 3. If there is an active rented record, mark it as unoccupied
             if ($rented) {
+                $unoccupiedAt = $request->filled('unoccupied_date')
+                    ? Carbon::parse($request->unoccupied_date)
+                    : now();
+                $balanceAtExit = $this->calculateRentalBalanceAtExit($rented, $stall, $unoccupiedAt);
+                $rate = $balanceAtExit['rate'];
+                $remainingBalance = $this->calculateRentalAnalysisBalance($rented, $stall, $unoccupiedAt);
+
+                $settlementAmount = round((float) $request->input('settlement_amount', 0), 2);
+                if ($settlementAmount > $remainingBalance) {
+                    return response()->json([
+                        'message' => 'Settlement amount cannot exceed the outstanding balance.',
+                    ], 422);
+                }
+
+                if ($settlementAmount > 0) {
+                    Payments::create([
+                        'rented_id' => $rented->id,
+                        'vendor_id' => $rented->vendor_id,
+                        'payment_type' => $settlementAmount >= $remainingBalance ? 'fully paid' : 'partial',
+                        'amount' => $settlementAmount,
+                        'payment_date' => now()->toDateString(),
+                        'missed_days' => $rate > 0 ? min((int) floor($settlementAmount / $rate), (int) $rented->missed_days) : 0,
+                        'advance_days' => 0,
+                        'status' => 'collected',
+                    ]);
+                }
+
+                $rented->remaining_balance = max(0, round($remainingBalance - $settlementAmount, 2));
+                $rented->missed_days = $rate > 0
+                    ? (int) ceil($rented->remaining_balance / $rate)
+                    : 0;
                 $rented->status = 'unoccupied';
                 
                 // Set the unoccupied date if provided, otherwise use current time
                 if ($request->has('unoccupied_date') && $request->unoccupied_date) {
-                    $unoccupiedDate = \Carbon\Carbon::parse($request->unoccupied_date);
-                    $rented->updated_at = $unoccupiedDate;
+                    $rented->updated_at = $unoccupiedAt;
                 }
                 
                 $rented->save();
@@ -53,6 +89,8 @@ class StallController extends Controller
                     'stall_id' => $stallId,
                     'rented_id' => $rented->id,
                     'vendor_id' => $rented->vendor_id,
+                    'settlement_amount' => $settlementAmount,
+                    'remaining_balance' => $rented->remaining_balance,
                     'previous_status' => 'occupied',
                     'new_status' => 'unoccupied'
                 ]);
@@ -70,6 +108,7 @@ class StallController extends Controller
                 'message' => 'Vendor removed and stall marked as vacant.',
                 'stall'   => $stall,
                 'rented'  => $rented,
+                'settlement_amount' => $rented ? $settlementAmount : 0,
             ]);
         });
     }
@@ -86,11 +125,7 @@ class StallController extends Controller
         $stall->save();
 
         // Save log entry
-        StallStatusLogs::create([
-            'stall_id'  => $stall->id,
-            'is_active' => $request->is_active,
-            'message'   => $request->message,
-        ]);
+      
 
         return response()->json([
             'success' => true,
@@ -105,9 +140,8 @@ class StallController extends Controller
         );
     }
 
-
-  public function addStall(Request $request)
-{
+    public function addStall(Request $request)
+    {
         $validated = $request->validate([
             'section_id'      => 'required|exists:section,id',
             'stall_number'    => 'required|string|max:50',
@@ -117,13 +151,11 @@ class StallController extends Controller
             'daily_rate'      => 'nullable|numeric|min:0',
             'monthly_rate'    => 'nullable|numeric|min:0',
             'is_monthly'      => 'nullable|boolean',
-            'effective_date'   => 'nullable|date|after_or_equal:today',
+            'effective_date'  => 'nullable|date|after_or_equal:today',
         ]);
 
-        // ✅ Automatically set default status to "vacant"
         $validated['status'] = 'vacant';
 
-        // Prevent duplicate stall position in the same section
         $exists = Stalls::where('section_id', $validated['section_id'])
             ->where('row_position', $validated['row_position'])
             ->where('column_position', $validated['column_position'])
@@ -136,10 +168,9 @@ class StallController extends Controller
             ], 422);
         }
 
-        return DB::transaction(function () use ($validated, $request) {
+        return DB::transaction(function () use ($validated) {
             $stall = Stalls::create($validated);
 
-            // Create initial rate history record if rates are provided
             if ($validated['daily_rate'] || $validated['monthly_rate']) {
                 $effectiveDate = $validated['effective_date'] ?? now()->toDateString();
                 $this->rateHistoryService->createRateHistory(
@@ -284,42 +315,7 @@ class StallController extends Controller
         });
     }
 
-    public function store(Request $request)
-{
-    // Your validation and logic here
 
-    // Save the tenant data
-    $tenant = Tenant::create([
-        'stall_id' => $request->stall_id,
-        'fullname' => $request->fullname,
-        'age' => $request->age,
-        'gender' => $request->gender,
-        'contact_number' => $request->contact_number,
-        'address' => $request->address,
-        'emergency_contact' => $request->emergency_contact,
-        'business_name' => $request->business_name,
-        'years_in_operation' => $request->years_in_operation,
-        'product_type' => $request->product_type,
-        'estimated_sales' => $request->estimated_sales,
-        'peak_time' => $request->peak_time,
-        'business' => $request->business,
-        'sanitary' => $request->sanitary,
-        'registration' => $request->registration,
-        'dti' => $request->dti,
-        'remarks' => $request->remarks,
-        'week1' => $request->week1,
-        'week2' => $request->week2,
-        'week3' => $request->week3,
-        'week4' => $request->week4,
-        'total_sales' => $request->total_sales,
-        'source' => $request->source,
-        'purchase_location' => $request->purchase_location,
-        'purchase_frequency' => $request->purchase_frequency,
-        'transport_mode' => $request->transport_mode,
-    ]);
-
-    return response()->json(['message' => 'Tenant created successfully', 'tenant' => $tenant]);
-}
 
 
      public function update(Request $request, $id)
@@ -610,6 +606,7 @@ public function getTenant($id)
 public function getTenantHistory($id)
 {
     $stall = Stalls::with([
+        'section',
         'rentals.vendor',
         'rentals.payments'
     ])->findOrFail($id);
@@ -637,7 +634,7 @@ public function getTenantHistory($id)
 
     $today = now()->startOfDay();
 
-    $formatted = $history->map(function ($r) use ($today) {
+    $formatted = $history->map(function ($r) use ($today, $stall) {
         // 🔹 Date range for this rental
         $startDate = $r->created_at->format('F d, Y');
         
@@ -728,15 +725,27 @@ public function getTenantHistory($id)
             $missedDays = (int) $r->missed_days;
         }
 
-        // 🔹 Remaining balance = missed_days * daily_rent
-        $dailyRent         = $r->daily_rent ?? 0;
-        $remainingBalance  = $missedDays * $dailyRent;
+        $isMonthly = (bool) ($r->stall->is_monthly ?? false);
+        if ($r->status === 'unoccupied' && $r->updated_at) {
+            $balanceAtExit = $this->calculateRentalBalanceAtExit($r, $r->stall, $r->updated_at);
+            $remainingBalance = $this->calculateRentalAnalysisBalance($r, $stall);
+            $missedDays = (int) ($r->missed_days ?? 0) > 0
+                ? (int) $r->missed_days
+                : $balanceAtExit['missed_periods'];
+        } else {
+            $rate = $isMonthly ? (float) ($r->monthly_rent ?? 0) : (float) ($r->daily_rent ?? 0);
+            $remainingBalance = $r->remaining_balance !== null && (float) $r->remaining_balance > 0
+                ? (float) $r->remaining_balance
+                : $missedDays * $rate;
+        }
 
         return [
             'vendor_name'        => $r->vendor->first_name ?? '—',
             'start_date'         => $startDate,
             'end_date'           => $endDate,
             'id'                 => $r->id,
+            'status'             => $r->status,
+            'is_monthly'         => $isMonthly,
             'daily_rent'         => $r->daily_rent,
             'monthly_rent'       => $r->monthly_rent,
             'payment_type'       => $paymentType,
@@ -752,6 +761,290 @@ public function getTenantHistory($id)
         'stall_id' => $stall->id,
         'history'  => $formatted,
     ]);
+}
+
+private function calculateRentalAnalysisBalance(Rented $rented, Stalls $stall, ?Carbon $asOfDate = null): float
+{
+    $year = $asOfDate?->year ?? now()->year;
+    $rentalStart = $rented->created_at->copy()->startOfDay();
+    $rentalEnd = $asOfDate
+        ? $asOfDate->copy()->endOfDay()
+        : ($rented->status === 'unoccupied' && $rented->updated_at
+            ? $rented->updated_at->copy()->endOfDay()
+            : Carbon::create($year, 12, 31)->endOfDay());
+    $section = $stall->section;
+    $balance = 0;
+
+    for ($month = 1; $month <= 12; $month++) {
+        $daysInMonth = Carbon::create($year, $month, 1)->daysInMonth;
+        $historicalDailyRate = $this->rateHistoryService->getDailyRateForMonth($stall->id, $year, $month);
+        $historicalMonthlyRate = $this->rateHistoryService->getMonthlyRateForMonth($stall->id, $year, $month);
+        $hasStallDailyRate = !is_null($historicalDailyRate) && $historicalDailyRate > 0;
+        $hasStallMonthlyRate = !is_null($historicalMonthlyRate) && $historicalMonthlyRate > 0;
+
+        if ($hasStallDailyRate && $hasStallMonthlyRate) {
+            if ($stall->is_monthly || ($stall->stall_number == 16 && strtolower($section->name) === 'meat & fish')) {
+                $dailyRate = $historicalMonthlyRate / $daysInMonth;
+            } else {
+                $dailyRate = $historicalDailyRate;
+            }
+        } elseif ($section->rate_type === 'fixed') {
+            $dailyRate = (float) ($section->monthly_rate ?? 0) / $daysInMonth;
+        } else {
+            $dailyRate = $hasStallDailyRate
+                ? $historicalDailyRate
+                : (float) ($rented->daily_rent ?? 0);
+        }
+
+        $monthlyRate = 0;
+        for ($day = 1; $day <= $daysInMonth; $day++) {
+            $currentDay = Carbon::create($year, $month, $day)->startOfDay();
+            if ($rentalStart->greaterThan($currentDay) || ($rentalEnd && $rentalEnd->lessThan($currentDay))) {
+                continue;
+            }
+
+            $monthlyRate += $dailyRate;
+        }
+
+        $monthlyPayments = $rented->payments
+            ->filter(function ($payment) use ($year, $month) {
+                return in_array($payment->status, ['paid', 'collected'], true)
+                    && $payment->payment_date->year === $year
+                    && $payment->payment_date->month === $month;
+            })
+            ->sum('amount');
+
+        $balance += max(0, $monthlyRate - $monthlyPayments);
+    }
+
+    return round($balance, 2);
+}
+
+public function getRentalBalanceAtDate(Request $request, $rentedId)
+{
+    $validated = $request->validate([
+        'date' => 'required|date|before_or_equal:today',
+    ]);
+
+    $rented = Rented::with(['stall.section', 'payments'])->findOrFail($rentedId);
+    if (!$rented->stall || !$rented->stall->section || $rented->status === 'unoccupied') {
+        return response()->json(['message' => 'Balance quotes are only available for active rentals.'], 422);
+    }
+
+    $asOfDate = Carbon::parse($validated['date']);
+    if ($asOfDate->lt($rented->created_at->copy()->startOfDay())) {
+        return response()->json(['message' => 'The selected date cannot be before this rental started.'], 422);
+    }
+
+    return response()->json([
+        'remaining_balance' => $this->calculateRentalAnalysisBalance($rented, $rented->stall, $asOfDate),
+    ]);
+}
+
+private function calculateRentalBalanceAtExit(Rented $rented, Stalls $stall, Carbon $exitDate): array
+{
+    $startDate = $rented->created_at->copy()->startOfDay();
+    $endDate = $exitDate->copy()->startOfDay();
+    $isMonthly = (bool) $stall->is_monthly;
+    $rate = $isMonthly
+        ? (float) ($rented->monthly_rent ?? $stall->monthly_rate ?? 0)
+        : (float) ($rented->daily_rent ?? $stall->daily_rate ?? 0);
+    $periods = 0;
+
+    if ($rate > 0 && $startDate->lt($endDate)) {
+        if ($isMonthly) {
+            $period = $startDate->copy()->startOfMonth();
+            while ($period->lt($endDate->copy()->startOfMonth())) {
+                $periods++;
+                $period->addMonth();
+            }
+        } else {
+            $period = $startDate->copy();
+            while ($period->lt($endDate)) {
+                $periods++;
+                $period->addDay();
+            }
+        }
+    }
+
+    $paidAmount = (float) $rented->payments()
+        ->whereIn('status', ['collected', 'remitted'])
+        ->sum('amount');
+    $balance = max(0, round(($periods * $rate) - $paidAmount, 2));
+
+    return [
+        'balance' => $balance,
+        'rate' => $rate,
+        'periods' => $periods,
+        'missed_periods' => $rate > 0 ? (int) ceil($balance / $rate) : 0,
+    ];
+}
+
+public function settleUnoccupiedBalance(Request $request, $rentedId)
+{
+    $validated = $request->validate([
+        'amount' => 'required|numeric|min:0.01',
+        'or_number' => 'nullable|digits_between:1,19',
+        'payment_date' => 'nullable|date|before_or_equal:today',
+    ]);
+
+    return DB::transaction(function () use ($validated, $rentedId) {
+        $rented = Rented::with('stall')->lockForUpdate()->findOrFail($rentedId);
+        if ($rented->status !== 'unoccupied' || !$rented->stall || !$rented->updated_at) {
+            return response()->json([
+                'message' => 'Payments through this action are only available for removed vendors.',
+            ], 422);
+        }
+
+        $balanceAtExit = $this->calculateRentalBalanceAtExit($rented, $rented->stall, $rented->updated_at);
+        $balance = $this->calculateRentalAnalysisBalance($rented, $rented->stall);
+        $amount = round((float) $validated['amount'], 2);
+        if ($balance <= 0) {
+            return response()->json(['message' => 'This rental has no remaining balance.'], 422);
+        }
+        if ($amount > $balance) {
+            return response()->json([
+                'message' => 'Payment cannot exceed the remaining balance of ₱' . number_format($balance, 2) . '.',
+            ], 422);
+        }
+
+        $remainingBalance = max(0, round($balance - $amount, 2));
+        Payments::create([
+            'rented_id' => $rented->id,
+            'vendor_id' => $rented->vendor_id,
+            'payment_type' => $remainingBalance === 0 ? 'fully paid' : 'partial',
+            'amount' => $amount,
+            'or_number' => $validated['or_number'] ?? null,
+            'payment_date' => $validated['payment_date'] ?? now()->toDateString(),
+            'missed_days' => $balanceAtExit['rate'] > 0
+                ? min((int) floor($amount / $balanceAtExit['rate']), (int) $rented->missed_days)
+                : 0,
+            'advance_days' => 0,
+            'status' => 'collected',
+        ]);
+
+        $exitDate = $rented->updated_at;
+        $rented->remaining_balance = $remainingBalance;
+        $rented->missed_days = $balanceAtExit['rate'] > 0
+            ? (int) ceil($remainingBalance / $balanceAtExit['rate'])
+            : 0;
+        $rented->timestamps = false;
+        $rented->save();
+        $rented->timestamps = true;
+        $rented->updated_at = $exitDate;
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Payment recorded against the removed rental.',
+            'remaining_balance' => $remainingBalance,
+        ]);
+    });
+}
+
+public function settleUnoccupiedBalances(Request $request)
+{
+    $validated = $request->validate([
+        'rental_ids' => 'required|array|min:1',
+        'rental_ids.*' => 'required|integer|distinct|exists:rented,id',
+        'amount' => 'required|numeric|min:0.01',
+        'or_number' => 'nullable|digits_between:1,19',
+        'payment_date' => 'nullable|date|before_or_equal:today',
+    ]);
+
+    return DB::transaction(function () use ($validated) {
+        $rentals = Rented::with('stall')
+            ->whereIn('id', $validated['rental_ids'])
+            ->orderBy('id')
+            ->lockForUpdate()
+            ->get();
+
+        $firstRental = $rentals->first();
+        if (!$firstRental || $rentals->count() !== count($validated['rental_ids'])) {
+            return response()->json(['message' => 'One or more rentals could not be found.'], 404);
+        }
+
+        $balances = [];
+        foreach ($rentals as $rental) {
+            if (
+                $rental->status !== 'unoccupied'
+                || !$rental->stall
+                || !$rental->updated_at
+                || $rental->vendor_id !== $firstRental->vendor_id
+                || $rental->stall->section_id !== $firstRental->stall->section_id
+                || (string) $rental->stall->stall_number !== (string) $firstRental->stall->stall_number
+            ) {
+                return response()->json([
+                    'message' => 'Only removed rentals for the same vendor, section, and stall can be paid together.',
+                ], 422);
+            }
+
+            $balanceAtExit = $this->calculateRentalBalanceAtExit($rental, $rental->stall, $rental->updated_at);
+            $balances[$rental->id] = [
+                'balance' => (float) ($rental->remaining_balance ?? 0) > 0
+                    ? (float) $rental->remaining_balance
+                    : $balanceAtExit['balance'],
+                'rate' => $balanceAtExit['rate'],
+            ];
+        }
+
+        $totalBalance = round(array_sum(array_column($balances, 'balance')), 2);
+        $paymentTotal = round((float) $validated['amount'], 2);
+        $amountToAllocate = $paymentTotal;
+        if ($totalBalance <= 0) {
+            return response()->json(['message' => 'These rentals have no remaining balance.'], 422);
+        }
+        if ($amountToAllocate > $totalBalance) {
+            return response()->json([
+                'message' => 'Payment cannot exceed the combined remaining balance of ₱' . number_format($totalBalance, 2) . '.',
+            ], 422);
+        }
+
+        foreach ($rentals as $rental) {
+            if ($amountToAllocate <= 0) {
+                break;
+            }
+
+            $balanceAtExit = $balances[$rental->id];
+            $balance = $balanceAtExit['balance'];
+            $paymentAmount = min($balance, $amountToAllocate);
+            if ($paymentAmount <= 0) {
+                continue;
+            }
+
+            $remainingBalance = max(0, round($balance - $paymentAmount, 2));
+            Payments::create([
+                'rented_id' => $rental->id,
+                'vendor_id' => $rental->vendor_id,
+                'payment_type' => $remainingBalance === 0 ? 'fully paid' : 'partial',
+                'amount' => $paymentAmount,
+                'or_number' => $validated['or_number'] ?? null,
+                'payment_date' => $validated['payment_date'] ?? now()->toDateString(),
+                'missed_days' => $balanceAtExit['rate'] > 0
+                    ? min((int) floor($paymentAmount / $balanceAtExit['rate']), (int) $rental->missed_days)
+                    : 0,
+                'advance_days' => 0,
+                'status' => 'collected',
+            ]);
+
+            $rental->remaining_balance = $remainingBalance;
+            $rental->missed_days = $balanceAtExit['rate'] > 0
+                ? (int) ceil($remainingBalance / $balanceAtExit['rate'])
+                : 0;
+            $exitDate = $rental->updated_at;
+            $rental->timestamps = false;
+            $rental->save();
+            $rental->timestamps = true;
+            $rental->updated_at = $exitDate;
+
+            $amountToAllocate = round($amountToAllocate - $paymentAmount, 2);
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Payment recorded against the removed rentals.',
+            'remaining_balance' => round($totalBalance - $paymentTotal, 2),
+        ]);
+    });
 }
 
 

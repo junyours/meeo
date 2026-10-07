@@ -4,6 +4,9 @@ namespace App\Http\Controllers;
 
 use App\Models\Department;
 use App\Models\DepartmentTarget;
+use App\Models\CashTicketsPayment;
+use App\Models\Payments;
+use App\Models\SlaughterhouseCollection;
 use Illuminate\Http\Request;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -23,12 +26,36 @@ class DepartmentCollectionController extends Controller
         $startYear = $request->input('start_year', date('Y'));
         $endYear = $request->input('end_year', date('Y'));
         
-        $departments = Department::with(['targets' => function($query) use ($startYear, $endYear) {
-            $query->whereBetween('year', [$startYear, $endYear]);
+        $departments = Department::select('id', 'name', 'code', 'description', 'is_active')
+        ->with(['targets' => function ($query) use ($startYear, $endYear) {
+            $query->select(
+                'id',
+                'department_id',
+                'year',
+                'annual_target',
+                'monthly_targets',
+                'january_collection',
+                'february_collection',
+                'march_collection',
+                'april_collection',
+                'may_collection',
+                'june_collection',
+                'july_collection',
+                'august_collection',
+                'september_collection',
+                'october_collection',
+                'november_collection',
+                'december_collection'
+            )->whereBetween('year', [$startYear, $endYear]);
         }])
         ->where('is_active', true)
         ->orderBy('name')
         ->get();
+
+        $automaticCollectionsByYear = [];
+        for ($year = $startYear; $year <= $endYear; $year++) {
+            $automaticCollectionsByYear[$year] = $this->getAutomaticCollections((int) $year);
+        }
 
         $departmentData = [];
         $totalTarget = 0;
@@ -62,8 +89,23 @@ class DepartmentCollectionController extends Controller
                     ]);
                 }
                 
+                $automaticCollections = $automaticCollectionsByYear[$year];
+                $departmentCode = preg_replace('/[^A-Z]/', '', strtoupper((string) $department->code));
+                $monthlyCollections = $this->getStoredMonthlyCollections($target);
+
+                $automaticCode = match ($departmentCode) {
+                    'MARKET' => 'MARKET',
+                    'WHARF' => 'WHARF',
+                    'SLAUGHTER', 'SLAUGHTERHOUSE' => 'SLAUGHTER',
+                    default => null,
+                };
+
+                if ($automaticCode && isset($automaticCollections[$automaticCode])) {
+                    $monthlyCollections = $automaticCollections[$automaticCode];
+                }
+
                 $targetAmount = $target ? $target->annual_target : 0;
-                $collectionAmount = $target ? $target->total_collection : 0;
+                $collectionAmount = array_sum($monthlyCollections);
                 $progressPercentage = $targetAmount > 0 ? ($collectionAmount / $targetAmount) * 100 : 0;
 
                 $totalTarget += $targetAmount;
@@ -74,6 +116,7 @@ class DepartmentCollectionController extends Controller
                     'name' => $department->name,
                     'code' => $department->code,
                     'description' => $department->description,
+                    'is_active' => (bool) $department->is_active,
                     'year' => $year, // Add year to distinguish between years
                     'target' => [
                         'annual_target' => (float) $targetAmount,
@@ -81,27 +124,12 @@ class DepartmentCollectionController extends Controller
                     ],
                     'collection' => [
                         'total_collection' => (float) $collectionAmount,
-                        'monthly_collections' => $target ? [
-                            'january' => (float) $target->january_collection,
-                            'february' => (float) $target->february_collection,
-                            'march' => (float) $target->march_collection,
-                            'april' => (float) $target->april_collection,
-                            'may' => (float) $target->may_collection,
-                            'june' => (float) $target->june_collection,
-                            'july' => (float) $target->july_collection,
-                            'august' => (float) $target->august_collection,
-                            'september' => (float) $target->september_collection,
-                            'october' => (float) $target->october_collection,
-                            'november' => (float) $target->november_collection,
-                            'december' => (float) $target->december_collection,
-                        ] : [],
+                        'monthly_collections' => $this->formatMonthlyCollections($monthlyCollections),
                     ],
                     'performance' => [
                         'progress_percentage' => (float) $progressPercentage,
                         'target_met' => $collectionAmount >= $targetAmount,
-                        'remaining' => max(0, $targetAmount - $collectionAmount),
                         'exceeded' => $collectionAmount > $targetAmount,
-                        'excess_amount' => max(0, $collectionAmount - $targetAmount),
                     ]
                 ];
             }
@@ -176,6 +204,15 @@ class DepartmentCollectionController extends Controller
         ]);
 
         $department = Department::findOrFail($departmentId);
+
+        $departmentCode = preg_replace('/[^A-Z]/', '', strtoupper((string) $department->code));
+        if (in_array($departmentCode, ['MARKET', 'WHARF', 'SLAUGHTER', 'SLAUGHTERHOUSE'], true)) {
+            return response()->json([
+                'success' => false,
+            'message' => 'Market, Wharf, and Slaughterhouse collections are calculated automatically from their collection records.',
+            ], 422);
+        }
+
         $year = $request->input('year');
         $month = $request->input('month');
         $amount = $request->input('amount');
@@ -262,6 +299,40 @@ class DepartmentCollectionController extends Controller
             'success' => true,
             'message' => 'Department created successfully',
             'department' => $department,
+        ]);
+    }
+
+    /**
+     * Update a department.
+     */
+    public function updateDepartment(Request $request, Department $department)
+    {
+        $validated = $request->validate([
+            'name' => 'required|string|max:255',
+            'code' => 'required|string|max:50|unique:departments,code,' . $department->id,
+            'description' => 'nullable|string|max:1000',
+            'is_active' => 'boolean',
+        ]);
+
+        $department->update($validated);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Department updated successfully',
+            'department' => $department->fresh(),
+        ]);
+    }
+
+    /**
+     * Soft-delete a department.
+     */
+    public function destroyDepartment(Department $department)
+    {
+        $department->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Department deleted successfully',
         ]);
     }
 
@@ -453,6 +524,16 @@ class DepartmentCollectionController extends Controller
 
         DB::transaction(function () use ($year, $collections, &$updatedTargets) {
             foreach ($collections as $collection) {
+                $department = Department::find($collection['department_id']);
+
+                $departmentCode = $department
+                    ? preg_replace('/[^A-Z]/', '', strtoupper((string) $department->code))
+                    : null;
+
+                if ($department && in_array($departmentCode, ['MARKET', 'WHARF', 'SLAUGHTER', 'SLAUGHTERHOUSE'], true)) {
+                    continue;
+                }
+
                 $target = DepartmentTarget::where('department_id', $collection['department_id'])
                                            ->where('year', $year)
                                            ->first();
@@ -470,5 +551,96 @@ class DepartmentCollectionController extends Controller
             'message' => 'Bulk collections updated successfully',
             'updated_targets' => $updatedTargets,
         ]);
+    }
+
+    private function getAutomaticCollections(int $year): array
+    {
+        $emptyMonths = array_fill(1, 12, 0.0);
+        $marketCollections = $emptyMonths;
+        $wharfCollections = $emptyMonths;
+        $slaughterCollections = $emptyMonths;
+
+        $paymentTotals = Payments::whereYear('payment_date', $year)
+            ->selectRaw('MONTH(payment_date) as month, SUM(amount) as total')
+            ->groupByRaw('MONTH(payment_date)')
+            ->get();
+
+        foreach ($paymentTotals as $paymentTotal) {
+            $marketCollections[(int) $paymentTotal->month] += (float) $paymentTotal->total;
+        }
+
+        $cashTicketTotals = CashTicketsPayment::whereYear('payment_date', $year)
+            ->whereHas('cashTicket', function ($query) {
+                $query->whereIn('enterprise', ['Market', 'Wharf']);
+            })
+            ->with('cashTicket:id,enterprise')
+            ->selectRaw('cash_ticket_id, MONTH(payment_date) as month, SUM(amount_paid) as total')
+            ->groupBy('cash_ticket_id')
+            ->groupByRaw('MONTH(payment_date)')
+            ->get();
+
+        foreach ($cashTicketTotals as $cashTicketTotal) {
+            $enterprise = $cashTicketTotal->cashTicket?->enterprise;
+            $month = (int) $cashTicketTotal->month;
+
+            if ($enterprise === 'Market') {
+                $marketCollections[$month] += (float) $cashTicketTotal->total;
+            } elseif ($enterprise === 'Wharf') {
+                $wharfCollections[$month] += (float) $cashTicketTotal->total;
+            }
+        }
+
+        $slaughterTotals = SlaughterhouseCollection::query()
+            ->whereYear('collection_date', $year)
+            ->selectRaw('MONTH(collection_date) as month, SUM(slaughterhouse_collection_items.total_amount) as total')
+            ->join('slaughterhouse_collection_items', function ($join) {
+                $join->on(
+                    'slaughterhouse_collections.id',
+                    '=',
+                    'slaughterhouse_collection_items.slaughterhouse_collection_id'
+                )->whereNull('slaughterhouse_collection_items.deleted_at');
+            })
+            ->whereNull('slaughterhouse_collections.deleted_at')
+            ->groupByRaw('MONTH(collection_date)')
+            ->get();
+
+        foreach ($slaughterTotals as $slaughterTotal) {
+            $slaughterCollections[(int) $slaughterTotal->month] = (float) $slaughterTotal->total;
+        }
+
+        return [
+            'MARKET' => $marketCollections,
+            'WHARF' => $wharfCollections,
+            'SLAUGHTER' => $slaughterCollections,
+        ];
+    }
+
+    private function getStoredMonthlyCollections(?DepartmentTarget $target): array
+    {
+        $collections = array_fill(1, 12, 0.0);
+
+        if (!$target) {
+            return $collections;
+        }
+
+        foreach (range(1, 12) as $month) {
+            $monthName = strtolower(Carbon::create()->month($month)->format('F'));
+            $collections[$month] = (float) $target->getMonthlyCollection($monthName);
+        }
+
+        return $collections;
+    }
+
+    private function formatMonthlyCollections(array $collections): array
+    {
+        $months = ['january', 'february', 'march', 'april', 'may', 'june',
+            'july', 'august', 'september', 'october', 'november', 'december'];
+
+        $formatted = [];
+        foreach ($months as $index => $month) {
+            $formatted[$month] = (float) ($collections[$index + 1] ?? 0);
+        }
+
+        return $formatted;
     }
 }

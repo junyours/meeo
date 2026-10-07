@@ -3,17 +3,19 @@
 namespace App\Models;
 
 // use Illuminate\Contracts\Auth\MustVerifyEmail;
+use App\Models\Collection;
+use App\Models\CollectionSession;
 use App\Models\VendorDetails;
-use Laravel\Sanctum\HasApiTokens;
-use Illuminate\Notifications\Notifiable;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Foundation\Auth\User as Authenticatable;
+use Illuminate\Notifications\Notifiable;
+use Laravel\Sanctum\HasApiTokens;
 
 
 class User extends Authenticatable
 {
     use HasApiTokens, HasFactory, Notifiable;
-    use HasApiTokens, Notifiable;
+
 
     /**
      * The attributes that are mass assignable.
@@ -27,6 +29,29 @@ class User extends Authenticatable
         'password',
         'role',
     ];
+    public function collectionSessions()
+{
+    return $this->hasMany(
+        CollectionSession::class,
+        'collector_id'
+    );
+}
+
+public function collections()
+{
+    return $this->hasMany(
+        Collection::class,
+        'collector_id'
+    );
+}
+
+public function verifiedCollectionSessions()
+{
+    return $this->hasMany(
+        CollectionSession::class,
+        'verified_by'
+    );
+}
 
     public function vendor()
 {

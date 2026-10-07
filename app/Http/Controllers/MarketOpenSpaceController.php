@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Models\Payments;
 
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 use Carbon\Carbon;
 
@@ -276,12 +277,31 @@ class MarketOpenSpaceController extends Controller
             $startDate = Carbon::createFromDate($year, 1, 1)->startOfYear();
             $endDate = Carbon::createFromDate($year, 12, 31)->endOfYear();
 
-            // Get all payments with relationships for the year
-            $payments = Payments::with(['rented.stall.section.area', 'vendor'])
-                ->whereBetween('payment_date', [$startDate, $endDate])
-                ->whereIn('status', ['paid', 'collected'])
-                ->orderBy('payment_date', 'desc')
-                ->get();
+            // The yearly view needs totals and grouped counts, not payment detail records.
+            $payments = DB::table('payments')
+                ->leftJoin('rented', 'payments.rented_id', '=', 'rented.id')
+                ->leftJoin('stall as stalls', function ($join) {
+                    $join->on('rented.stall_id', '=', 'stalls.id')
+                        ->whereNull('stalls.deleted_at');
+                })
+                ->leftJoin('section as sections', function ($join) {
+                    $join->on('stalls.section_id', '=', 'sections.id')
+                        ->whereNull('sections.deleted_at');
+                })
+                ->leftJoin('areas', function ($join) {
+                    $join->on('sections.area_id', '=', 'areas.id')
+                        ->whereNull('areas.deleted_at');
+                })
+                ->whereBetween('payments.payment_date', [$startDate, $endDate])
+                ->whereIn('payments.status', ['paid', 'collected'])
+                ->orderByDesc('payments.payment_date')
+                ->get([
+                    'payments.vendor_id',
+                    'payments.payment_date',
+                    'payments.amount',
+                    'areas.name as area_name',
+                    'sections.name as section_name',
+                ]);
 
             // Initialize monthly data structure
             $monthlyData = [];
@@ -299,17 +319,18 @@ class MarketOpenSpaceController extends Controller
                     'open_space_amount' => 0,
                     'taboc_gym_amount' => 0,
                     'total_amount' => 0,
-                    'market_payments' => collect(),
-                    'open_space_payments' => collect(),
-                    'taboc_gym_payments' => collect()
+                    'market_payment_keys' => [],
+                    'open_space_payment_keys' => [],
+                    'taboc_gym_payment_keys' => []
                 ];
             }
 
-            // Categorize payments by month and area
+            // Preserve the existing vendor-and-date grouped count without building detail rows.
             foreach ($payments as $payment) {
-                $areaName = strtolower($payment->rented?->stall?->section?->area?->name ?? '');
-                $sectionName = strtolower($payment->rented?->stall?->section?->name ?? '');
-                $monthNum = $payment->payment_date->month;
+                $areaName = strtolower($payment->area_name ?? '');
+                $sectionName = strtolower($payment->section_name ?? '');
+                $monthNum = Carbon::parse($payment->payment_date)->month;
+                $paymentKey = ($payment->vendor_id ?? '') . '_' . Carbon::parse($payment->payment_date)->format('Y-m-d');
                 
                 $isTabocGymArea = str_contains($sectionName, 'taboc') || 
                                    str_contains($sectionName, 'gym');
@@ -320,13 +341,13 @@ class MarketOpenSpaceController extends Controller
 
                 if ($isTabocGymArea) {
                     $monthlyData[$monthNum]['taboc_gym_amount'] += $payment->amount;
-                    $monthlyData[$monthNum]['taboc_gym_payments']->push($payment);
+                    $monthlyData[$monthNum]['taboc_gym_payment_keys'][$paymentKey] = true;
                 } elseif ($isOpenSpaceArea) {
                     $monthlyData[$monthNum]['open_space_amount'] += $payment->amount;
-                    $monthlyData[$monthNum]['open_space_payments']->push($payment);
+                    $monthlyData[$monthNum]['open_space_payment_keys'][$paymentKey] = true;
                 } else {
                     $monthlyData[$monthNum]['market_amount'] += $payment->amount;
-                    $monthlyData[$monthNum]['market_payments']->push($payment);
+                    $monthlyData[$monthNum]['market_payment_keys'][$paymentKey] = true;
                 }
                 
                 $monthlyData[$monthNum]['total_amount'] += $payment->amount;
@@ -342,13 +363,11 @@ class MarketOpenSpaceController extends Controller
             ];
 
             foreach ($monthlyData as $monthNum => &$data) {
-                $data['market_payments'] = $this->groupPaymentsByVendorAndDate($data['market_payments']);
-                $data['open_space_payments'] = $this->groupPaymentsByVendorAndDate($data['open_space_payments']);
-                $data['taboc_gym_payments'] = $this->groupPaymentsByVendorAndDate($data['taboc_gym_payments']);
-                $data['market_payment_count'] = $data['market_payments']->count();
-                $data['open_space_payment_count'] = $data['open_space_payments']->count();
-                $data['taboc_gym_payment_count'] = $data['taboc_gym_payments']->count();
+                $data['market_payment_count'] = count($data['market_payment_keys']);
+                $data['open_space_payment_count'] = count($data['open_space_payment_keys']);
+                $data['taboc_gym_payment_count'] = count($data['taboc_gym_payment_keys']);
                 $data['total_payment_count'] = $data['market_payment_count'] + $data['open_space_payment_count'] + $data['taboc_gym_payment_count'];
+                unset($data['market_payment_keys'], $data['open_space_payment_keys'], $data['taboc_gym_payment_keys']);
                 
                 $yearlyTotals['market_amount'] += $data['market_amount'];
                 $yearlyTotals['open_space_amount'] += $data['open_space_amount'];

@@ -9,6 +9,7 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Str;
 
 class LoginController extends Controller
@@ -30,21 +31,7 @@ class LoginController extends Controller
             $cacheKey = 'captcha_' . $captchaHash;
             $sessionCaptcha = Cache::get($cacheKey);
             
-            // Debug logging
-            \Log::info('Captcha validation attempt', [
-                'captcha_hash' => $captchaHash,
-                'cache_key' => $cacheKey,
-                'cached_captcha' => $sessionCaptcha,
-                'request_captcha' => $request->captcha,
-                'uppercase_cached' => $sessionCaptcha ? strtoupper($sessionCaptcha) : null,
-                'uppercase_request' => strtoupper($request->captcha)
-            ]);
-            
             if ($sessionCaptcha && strtoupper($request->captcha) !== strtoupper($sessionCaptcha)) {
-                \Log::warning('Captcha mismatch', [
-                    'cached' => $sessionCaptcha,
-                    'request' => $request->captcha
-                ]);
                 return response()->json([
                     'success' => false,
                     'message' => 'Invalid captcha code'
@@ -58,11 +45,6 @@ class LoginController extends Controller
         } else {
             // Fallback to session-based validation for backward compatibility
             $sessionCaptcha = session('captcha_code');
-            \Log::info('Fallback to session validation', [
-                'session_captcha' => $sessionCaptcha,
-                'request_captcha' => $request->captcha
-            ]);
-            
             if ($sessionCaptcha && strtoupper($request->captcha) !== strtoupper($sessionCaptcha)) {
                 return response()->json([
                     'success' => false,
@@ -86,12 +68,9 @@ class LoginController extends Controller
             ], 401);
         }
 
-        $user = User::where('username', $request->username)->first();
-
         return response()->json([
             'success' => true,
-            'message' => 'Credentials validated successfully',
-            'user' => $user
+            'message' => 'Credentials validated successfully'
         ]);
     }
 
@@ -139,16 +118,12 @@ class LoginController extends Controller
             ]);
         } catch (\Exception $e) {
             // Log the error for debugging
-            \Log::error('OTP sending failed: ' . $e->getMessage());
+            Log::error('OTP sending failed: ' . $e->getMessage());
             
-            // For development, return OTP in response (remove in production)
             return response()->json([
-                'success' => true,
-                'message' => 'OTP generated successfully (email not configured)',
-                'otp' => $otp, // Remove this in production
-                'debug' => 'Email configuration needed. Check your .env file.',
-                'email_sent_to' => $user->email
-            ]);
+                'success' => false,
+                'message' => 'Unable to send a verification code. Please try again later.'
+            ], 503);
         }
     }
 
@@ -188,7 +163,11 @@ class LoginController extends Controller
         return response()->json([
             'success' => true,
             'message' => 'OTP verified successfully',
-            'user' => $user,
+            'user' => [
+                'id' => $user->id,
+                'role' => $user->role,
+                'collector_id' => $user->getAttribute('collector_id'),
+            ],
             'token' => $token
         ]);
     }
@@ -207,13 +186,6 @@ class LoginController extends Controller
         $hash = hash('sha256', $code . config('app.key'));
         Cache::put('captcha_' . $hash, $code, now()->addMinutes(5)); // Store for 5 minutes
         
-        // Debug logging
-        \Log::info('Captcha generated and stored', [
-            'code' => $code,
-            'hash' => $hash,
-            'cache_key' => 'captcha_' . $hash
-        ]);
-
         // Create captcha image
         $width = 180;
         $height = 60;
@@ -928,15 +900,12 @@ public function forgotPassword(Request $request)
             'message' => 'Password reset link sent to your email'
         ]);
     } catch (\Exception $e) {
-        \Log::error('Password reset email failed: ' . $e->getMessage());
+        Log::error('Password reset email failed: ' . $e->getMessage());
         
         return response()->json([
-            'success' => true,
-            'message' => 'Password reset token generated (email not configured)',
-            'token' => $token, // Remove this in production
-            'debug' => 'Email configuration needed. Check your .env file.',
-            'reset_url' => url("/reset-password?token={$token}")
-        ]);
+            'success' => false,
+            'message' => 'Unable to send password reset instructions. Please try again later.'
+        ], 503);
     }
 }
 
@@ -982,19 +951,15 @@ public function sendResetOTP(Request $request)
 
         return response()->json([
             'success' => true,
-            'message' => 'OTP sent successfully to your email',
-            'email_hint' => 'OTP sent to: ' . substr($user->email, 0, 3) . '***@' . substr($user->email, strpos($user->email, '@') + 1)
+            'message' => 'OTP sent successfully to your email'
         ]);
     } catch (\Exception $e) {
-        \Log::error('Reset OTP sending failed: ' . $e->getMessage());
+        Log::error('Reset OTP sending failed: ' . $e->getMessage());
         
         return response()->json([
-            'success' => true,
-            'message' => 'OTP generated successfully (email not configured)',
-            'otp' => $otp, // Remove this in production
-            'debug' => 'Email configuration needed. Check your .env file.',
-            'email_sent_to' => $user->email
-        ]);
+            'success' => false,
+            'message' => 'Unable to send a password reset code. Please try again later.'
+        ], 503);
     }
 }
 

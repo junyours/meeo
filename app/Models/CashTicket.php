@@ -12,6 +12,7 @@ class CashTicket extends Model
 
     protected $fillable = [
         'type',
+        'enterprise',
         'quantity',
         'amount',
         'notes',

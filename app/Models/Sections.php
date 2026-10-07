@@ -4,7 +4,7 @@ namespace App\Models;
 
 use App\Models\Area;
 use App\Models\Stalls;
-use App\Models\Application;
+
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\SoftDeletes;
@@ -32,10 +32,6 @@ public function stalls() {
     return $this->hasMany(Stalls::class, 'section_id'); // singular
 }
 
-public function applications()
-{
-    return $this->hasMany(Application::class, 'section_id');
-}
 
     public function area()
 {

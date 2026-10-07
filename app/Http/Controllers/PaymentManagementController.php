@@ -135,7 +135,29 @@ class PaymentManagementController extends Controller
             ->orderBy('last_name')
             ->get();
 
-        return response()->json($vendors);
+        $paymentStats = Payments::query()
+            ->select('vendor_id')
+            ->selectRaw('COUNT(*) as total_payments, COALESCE(SUM(amount), 0) as total_amount, MAX(payment_date) as last_payment')
+            ->whereIn('vendor_id', $vendors->pluck('id'))
+            ->groupBy('vendor_id')
+            ->get()
+            ->keyBy('vendor_id');
+
+        return response()->json($vendors->map(function ($vendor) use ($paymentStats) {
+            $stats = $paymentStats->get($vendor->id);
+
+            return [
+                'id' => $vendor->id,
+                'first_name' => $vendor->first_name,
+                'last_name' => $vendor->last_name,
+                'contact_number' => $vendor->contact_number,
+                
+                'status' => $vendor->status,
+                'total_payments' => (int) ($stats->total_payments ?? 0),
+                'total_amount' => (float) ($stats->total_amount ?? 0),
+                'last_payment' => $stats->last_payment ?? null,
+            ];
+        })->values());
     }
 
     /**
@@ -197,7 +219,9 @@ class PaymentManagementController extends Controller
      */
     public function getVendorPayments($vendorId, Request $request)
     {
-        $query = Payments::with(['rented.stall'])
+        $query = Payments::query()
+            ->select('id', 'rented_id', 'or_number', 'payment_type', 'amount', 'payment_date', 'missed_days', 'advance_days', 'status')
+            ->with(['rented:id,stall_id', 'rented.stall:id,stall_number'])
             ->where('vendor_id', $vendorId)
             ->orderBy('payment_date', 'desc');
 
@@ -220,11 +244,9 @@ class PaymentManagementController extends Controller
                 'stall' => $payment->rented?->stall ? [
                     'stall_number' => $payment->rented->stall->stall_number,
                 ] : null,
-                'created_at' => $payment->created_at,
-                'updated_at' => $payment->updated_at,
             ];
         });
 
-        return response()->json($payments);
+        return response()->json($payments->values(), 200);
     }
 }

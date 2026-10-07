@@ -10,7 +10,41 @@ class AreaController extends Controller
 {
 public function index()
 {
-    $areas = Area::with(['sections.stalls.rented'])->get();
+    $areas = Area::query()
+        ->select('id', 'name', 'column_count', 'rows_per_column')
+        ->with(['sections' => function ($query) {
+            $query->select(
+                'id',
+                'name',
+                'area_id',
+                'rate_type',
+                'rate',
+                'monthly_rate',
+                'daily_rate',
+                'column_index',
+                'row_index'
+            )->with(['stalls' => function ($query) {
+                $query->select(
+                    'id',
+                    'section_id',
+                    'stall_number',
+                    'status',
+                    'row_position',
+                    'column_position',
+                    'size',
+                    'is_active',
+                    'message',
+                    'is_monthly'
+                )->with(['currentRental' => function ($query) {
+                    $query->select('id', 'stall_id', 'status', 'created_at', 'missed_days')
+                        ->with(['payments' => function ($query) {
+                            $query->select('id', 'rented_id', 'payment_date', 'advance_days', 'status')
+                                ->orderByDesc('payment_date');
+                        }]);
+                }]);
+            }]);
+        }])
+        ->get();
 
     $areas->transform(function ($area) {
         $area->sections->transform(function ($section) {
@@ -22,6 +56,19 @@ public function index()
                 $nextDueDate = null;
 
                 $rented = $stall->currentRental;
+                $payments = $rented?->payments ?? collect();
+                $latestPayment = $payments->first();
+                $paidDates = [];
+                $paidMonths = [];
+
+                foreach ($payments as $payment) {
+                    if (!in_array($payment->status, ['collected', 'remitted'], true) || !$payment->payment_date) {
+                        continue;
+                    }
+
+                    $paidDates[$payment->payment_date->toDateString()] = true;
+                    $paidMonths[$payment->payment_date->format('Y-m')] = true;
+                }
 
                 // 🔹 1. INACTIVE STALL (highest priority)
                 if (!$stall->is_active) {
@@ -39,9 +86,6 @@ public function index()
                     // Use created_at as rental start date for missed days calculation
                     $rentalStart = Carbon::parse($rented->created_at)->startOfDay();
 
-                    // Determine next due date based on payment history
-                    $latestPayment = $rented->payments()->latest('payment_date')->first();
-                    
                     // Check if stall is monthly
                     $isMonthlyStall = $stall->is_monthly ?? false;
                     
@@ -55,11 +99,7 @@ public function index()
                             $expectedPaymentMonth = $rentalStart->copy();
                             
                             while ($expectedPaymentMonth->lt($today)) {
-                                $hasPaymentForMonth = $rented->payments()
-                                    ->whereYear('payment_date', $expectedPaymentMonth->year)
-                                    ->whereMonth('payment_date', $expectedPaymentMonth->month)
-                                    ->whereIn('status', ['collected', 'remitted'])
-                                    ->exists();
+                                $hasPaymentForMonth = isset($paidMonths[$expectedPaymentMonth->format('Y-m')]);
                                 
                                 if (!$hasPaymentForMonth) {
                                     $missedMonths++;
@@ -76,10 +116,7 @@ public function index()
                             $calculatedMissedDays = 0;
                             
                             while ($expectedPaymentDate->lt($today)) {
-                                $hasPaymentForDay = $rented->payments()
-                                    ->whereDate('payment_date', $expectedPaymentDate)
-                                    ->whereIn('status', ['collected', 'remitted'])
-                                    ->exists();
+                                $hasPaymentForDay = isset($paidDates[$expectedPaymentDate->toDateString()]);
                                 
                                 if (!$hasPaymentForDay) {
                                     $calculatedMissedDays++;
@@ -236,8 +273,6 @@ public function index()
                     'column_position' => $stall->column_position,
                     'size'            => $stall->size,
                     'section_id'      => $stall->section_id,
-                    'created_at'      => $stall->created_at,
-                    'updated_at'      => $stall->updated_at,
                     'is_active'       => $stall->is_active,
                     'message'         => $stall->message,
                     'is_monthly'      => $stall->is_monthly,
@@ -255,12 +290,16 @@ public function index()
                 'column_index'  => $section->column_index,
                 'row_index'     => $section->row_index,
                 'stalls'        => $section->stalls,
-                'created_at'    => $section->created_at,
-                'updated_at'    => $section->updated_at,
             ];
         });
 
-        return $area;
+        return [
+            'id' => $area->id,
+            'name' => $area->name,
+            'column_count' => $area->column_count,
+            'rows_per_column' => $area->rows_per_column,
+            'sections' => $area->sections,
+        ];
     });
 
     return response()->json([

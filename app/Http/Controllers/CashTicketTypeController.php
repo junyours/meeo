@@ -15,7 +15,11 @@ class CashTicketTypeController extends Controller
      */
     public function index()
     {
-        $cashTickets = CashTicket::with('payments')->get();
+        $cashTickets = CashTicket::query()
+            ->select('id', 'type', 'enterprise', 'quantity', 'amount', 'notes')
+            ->orderBy('enterprise')
+            ->orderBy('type')
+            ->get();
         return response()->json([
             'success' => true,
             'data' => $cashTickets
@@ -29,6 +33,7 @@ class CashTicketTypeController extends Controller
     {
         $validator = Validator::make($request->all(), [
             'type' => 'required|string|max:255|unique:cash_tickets,type',
+            'enterprise' => 'required|string|in:Market,Wharf,Slaughterhouse',
             'quantity' => 'required|integer|min:1',
             'amount' => 'required|numeric|min:0',
             'notes' => 'nullable|string'
@@ -42,7 +47,7 @@ class CashTicketTypeController extends Controller
             ], 422);
         }
 
-        $cashTicket = CashTicket::create($request->all());
+        $cashTicket = CashTicket::create($validator->validated());
 
         return response()->json([
             'success' => true,
@@ -87,6 +92,7 @@ class CashTicketTypeController extends Controller
 
         $validator = Validator::make($request->all(), [
             'type' => 'required|string|max:255|unique:cash_tickets,type,' . $id,
+            'enterprise' => 'required|string|in:Market,Wharf,Slaughterhouse',
             'quantity' => 'required|integer|min:1',
             'amount' => 'required|numeric|min:0',
             'notes' => 'nullable|string'
@@ -100,7 +106,7 @@ class CashTicketTypeController extends Controller
             ], 422);
         }
 
-        $cashTicket->update($request->all());
+        $cashTicket->update($validator->validated());
 
         return response()->json([
             'success' => true,
@@ -160,17 +166,20 @@ class CashTicketTypeController extends Controller
         $month = $request->month;
         $year = $request->year;
         
-        // Get all cash ticket types
-        $cashTicketTypes = CashTicket::all();
-        
-        // Get all payments for the specified month
-        $payments = CashTicketsPayment::with('cashTicket')
-            ->whereMonth('payment_date', $month)
-            ->whereYear('payment_date', $year)
-            ->get()
-            ->groupBy(function($payment) {
-                return Carbon::parse($payment->payment_date)->format('Y-m-d');
-            });
+        $cashTicketTypes = CashTicket::query()
+            ->select('id', 'type', 'enterprise')
+            ->orderBy('enterprise')
+            ->orderBy('type')
+            ->get();
+
+        $firstDate = Carbon::create($year, $month, 1)->startOfDay();
+        $lastDate = $firstDate->copy()->endOfMonth()->endOfDay();
+        $payments = CashTicketsPayment::query()
+            ->whereBetween('payment_date', [$firstDate->toDateString(), $lastDate->toDateString()])
+            ->selectRaw('cash_ticket_id, DATE(payment_date) AS collection_date, SUM(amount_paid) AS total_amount, MAX(notes) AS notes')
+            ->groupBy('cash_ticket_id')
+            ->groupByRaw('DATE(payment_date)')
+            ->get();
 
         // Build daily data structure
         $dailyData = [];
@@ -181,31 +190,31 @@ class CashTicketTypeController extends Controller
             $dailyData[$date] = [
                 'date' => $date,
                 'types' => [],
-                'total' => 0
             ];
             
             // Initialize all types with 0
             foreach ($cashTicketTypes as $type) {
                 $dailyData[$date]['types'][$type->id] = [
-                    'type_name' => $type->type,
                     'amount' => 0,
-                    'quantity' => 0
+                    'notes' => null,
                 ];
             }
         }
 
         // Fill in actual payment data
-        foreach ($payments as $date => $dayPayments) {
-            foreach ($dayPayments as $payment) {
-                $dailyData[$date]['types'][$payment->cash_ticket_id]['amount'] = $payment->amount_paid;
-                $dailyData[$date]['total'] += $payment->amount_paid;
+        foreach ($payments as $payment) {
+            $date = Carbon::parse($payment->collection_date)->format('Y-m-d');
+            if (isset($dailyData[$date]['types'][$payment->cash_ticket_id])) {
+                $dailyData[$date]['types'][$payment->cash_ticket_id] = [
+                    'amount' => (float) $payment->total_amount,
+                    'notes' => $payment->notes,
+                ];
             }
         }
 
         return response()->json([
             'success' => true,
             'data' => [
-                'cash_ticket_types' => $cashTicketTypes,
                 'daily_data' => array_values($dailyData),
                 'month' => $month,
                 'year' => $year
@@ -232,16 +241,18 @@ class CashTicketTypeController extends Controller
 
         $year = $request->year;
         
-        // Get all cash ticket types
-        $cashTicketTypes = CashTicket::all();
-        
-        // Get all payments for the specified year
-        $payments = CashTicketsPayment::with('cashTicket')
-            ->whereYear('payment_date', $year)
-            ->get()
-            ->groupBy(function($payment) {
-                return Carbon::parse($payment->payment_date)->format('Y-m');
-            });
+        $cashTicketTypes = CashTicket::query()
+            ->select('id', 'type', 'enterprise')
+            ->orderBy('enterprise')
+            ->orderBy('type')
+            ->get();
+
+        $payments = CashTicketsPayment::query()
+            ->whereBetween('payment_date', ["{$year}-01-01", "{$year}-12-31"])
+            ->selectRaw('cash_ticket_id, MONTH(payment_date) AS collection_month, SUM(amount_paid) AS total_amount')
+            ->groupBy('cash_ticket_id')
+            ->groupByRaw('MONTH(payment_date)')
+            ->get();
 
         // Build monthly data structure
         $monthlyData = [];
@@ -252,30 +263,27 @@ class CashTicketTypeController extends Controller
                 'month' => $month,
                 'month_name' => Carbon::create($year, $month)->format('F'),
                 'types' => [],
-                'total' => 0
             ];
             
             // Initialize all types with 0
             foreach ($cashTicketTypes as $type) {
                 $monthlyData[$monthKey]['types'][$type->id] = [
-                    'type_name' => $type->type,
                     'amount' => 0
                 ];
             }
         }
 
         // Fill in actual payment data
-        foreach ($payments as $monthKey => $monthPayments) {
-            foreach ($monthPayments as $payment) {
-                $monthlyData[$monthKey]['types'][$payment->cash_ticket_id]['amount'] += $payment->amount_paid;
-                $monthlyData[$monthKey]['total'] += $payment->amount_paid;
+        foreach ($payments as $payment) {
+            $monthKey = Carbon::create($year, (int) $payment->collection_month, 1)->format('Y-m');
+            if (isset($monthlyData[$monthKey]['types'][$payment->cash_ticket_id])) {
+                $monthlyData[$monthKey]['types'][$payment->cash_ticket_id]['amount'] = (float) $payment->total_amount;
             }
         }
 
         return response()->json([
             'success' => true,
             'data' => [
-                'cash_ticket_types' => $cashTicketTypes,
                 'monthly_data' => array_values($monthlyData),
                 'year' => $year
             ]

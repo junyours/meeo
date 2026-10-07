@@ -12,14 +12,15 @@ use Illuminate\Validation\Rule;
 
 class VendorManagementController extends Controller
 {
-   public function index(Request $request)
+  public function index(Request $request)
 {
-    $query = VendorDetails::with(['certificates', 'activeCertificate'])
-      ->orderBy('created_at', 'desc');
+    $query = VendorDetails::query()
+        ->orderBy('created_at', 'desc');
 
     if ($request->search) {
         $search = $request->search;
-        $query->where(function($q) use ($search) {
+
+        $query->where(function ($q) use ($search) {
             $q->where('first_name', 'like', "%{$search}%")
               ->orWhere('middle_name', 'like', "%{$search}%")
               ->orWhere('last_name', 'like', "%{$search}%")
@@ -32,12 +33,12 @@ class VendorManagementController extends Controller
         $query->where('status', $request->status);
     }
 
-    // ❌ REMOVE paginate()
-    // ✅ RETURN ALL
+    // Return all vendors
     $vendors = $query->get();
 
     return response()->json($vendors);
 }
+
 
 
     public function store(Request $request)

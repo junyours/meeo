@@ -12,7 +12,8 @@ class OfficeActivitiesController extends Controller
     public function index(Request $request)
     {
         try {
-            $activities = OfficeActivities::with('images')
+            $activities = OfficeActivities::query()
+                ->select('id', 'title', 'description', 'activity_type', 'activity_date', 'image')
                 ->orderBy('activity_date', 'desc')
                 ->get();
 

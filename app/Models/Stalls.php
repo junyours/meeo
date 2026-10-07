@@ -2,15 +2,15 @@
 
 namespace App\Models;
 
+
 use App\Models\Rented;
 use App\Models\Sections;
-use App\Models\Application;
-use App\Models\StallStatusLogs;
-use App\Models\VendorDetails;
 use App\Models\StallRateHistory;
-use Illuminate\Database\Eloquent\Model;
+
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\SoftDeletes;
+use Illuminate\Support\Facades\Log;
 
 class Stalls extends Model
 {
@@ -50,16 +50,9 @@ class Stalls extends Model
     return $this->hasMany(Rented::class, 'stall_id');
 }
 
- public function applications()
-{
-    return $this->belongsToMany(Application::class, 'rented', 'stall_id', 'application_id');
-}
 
-  public function statusLogs()
-    {
-        return $this->hasMany(StallStatusLogs::class, 'stall_id')
-                    ->orderBy('created_at', 'desc');
-    }
+
+
 
     /**
      * Get the rate history for this stall
@@ -134,7 +127,7 @@ class Stalls extends Model
     {
         $effectiveFromDate = $effectiveFromDate ?? now()->toDateString();
         
-        \Log::info('Stalls.createRateHistory called', [
+        Log::info('Stalls.createRateHistory called', [
             'stall_id' => $this->id,
             'daily_rate' => $dailyRate,
             'monthly_rate' => $monthlyRate,
@@ -150,14 +143,14 @@ class Stalls extends Model
                 'effective_from' => $effectiveFromDate,
             ]);
             
-            \Log::info('Rate history created successfully in database', [
+            Log::info('Rate history created successfully in database', [
                 'rate_history_id' => $rateHistory->id,
                 'stall_id' => $rateHistory->stall_id
             ]);
             
             return $rateHistory;
         } catch (\Exception $e) {
-            \Log::error('Failed to create rate history in database', [
+            Log::error('Failed to create rate history in database', [
                 'error' => $e->getMessage(),
                 'stall_id' => $this->id,
                 'daily_rate' => $dailyRate,

@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\ActivitySalesReportController;
 use App\Http\Controllers\AdminController;
+use App\Http\Controllers\Admin\CollectorAccountController;
 use App\Http\Controllers\AdminProfileController;
 use App\Http\Controllers\AvailableStallController;
 use App\Http\Controllers\Api\AvailableProductsController;
@@ -11,6 +12,7 @@ use App\Http\Controllers\AreaController;
 use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\CashTicketTypeController;
 use App\Http\Controllers\CertificateController;
+use App\Http\Controllers\DepartmentCollectionController;
 use App\Http\Controllers\EventActivityController;
 use App\Http\Controllers\EventPaymentController;
 use App\Http\Controllers\EventSalesController;
@@ -21,13 +23,16 @@ use App\Http\Controllers\MarketOpenSpaceController;
 use App\Http\Controllers\OfficeActivitiesController;
 use App\Http\Controllers\PaymentManagementController;
 use App\Http\Controllers\PaymentMonitoringController;
+use App\Http\Controllers\RentalReportController;
 use App\Http\Controllers\SectionController;
+use App\Http\Controllers\SlaughterhouseCollectionController;
 use App\Http\Controllers\StallController;
 use App\Http\Controllers\StallRateHistoryController;
 use App\Http\Controllers\TargetCollectionController;
 use App\Http\Controllers\VendorAnalysisController;
 use App\Http\Controllers\VendorController;
 use App\Http\Controllers\VendorManagementController;
+use App\Http\Controllers\VendorQrCodeController;
 use App\Http\Controllers\VendorPaymentCalendarController;
 use App\Http\Controllers\VendorPaymentController;
 use Illuminate\Support\Facades\Route;
@@ -62,6 +67,12 @@ Route::post('/register', [LoginController::class, 'register']);
 Route::post('/create_account', [LoginController::class, 'AdminCreateAccount']);
 Route::post('/login', [LoginController::class, 'login']);
 Route::middleware('auth:sanctum')->post('/logout', [LoginController::class, 'logout']);
+
+Route::middleware('auth:sanctum')->prefix('admin/collector-accounts')->group(function () {
+    Route::get('/', [CollectorAccountController::class, 'index']);
+    Route::post('/', [CollectorAccountController::class, 'store']);
+    Route::post('/{user}/reset-default-password', [CollectorAccountController::class, 'resetDefaultPassword']);
+});
 
 // 🔐 Enhanced Authentication Routes
 Route::prefix('auth')->group(function () {
@@ -134,6 +145,9 @@ Route::post('/stall/{stall}/remove-vendor', [StallController::class, 'removeVend
 
 Route::middleware('auth:sanctum')->group(function () {
 Route::get('/stall/{id}', [StallController::class, 'getTenantHistory']);
+Route::get('/rented/{rentedId}/balance-at-date', [StallController::class, 'getRentalBalanceAtDate']);
+Route::post('/rented/{rentedId}/settle-unoccupied-balance', [StallController::class, 'settleUnoccupiedBalance']);
+Route::post('/rented/settle-unoccupied-balances', [StallController::class, 'settleUnoccupiedBalances']);
 Route::get('/rented/{id}/payments', [VendorController::class, 'getPayments']);
 Route::get('/stall/{id}/tenant', [StallController::class, 'getTenant']);
 });
@@ -174,6 +188,12 @@ Route::middleware('auth:sanctum')->prefix('vendor-management')->group(function (
 
 });
 
+Route::middleware('auth:sanctum')->prefix('vendor-qr-codes')->group(function () {
+    Route::get('/', [VendorQrCodeController::class, 'index']);
+    Route::post('/{vendor}/generate', [VendorQrCodeController::class, 'generate']);
+    Route::get('/scan/{token}', [VendorQrCodeController::class, 'scan']);
+});
+
 // 💰 Vendor Payment Management Routes
 Route::middleware('auth:sanctum')->prefix('vendor-payments')->group(function () {
     Route::get('/', [VendorPaymentController::class, 'index']);
@@ -211,6 +231,17 @@ Route::middleware('auth:sanctum')->prefix('target-collection')->group(function (
     Route::get('/monthly-report', [TargetCollectionController::class, 'getMonthlyReport']);
 });
 
+// 📊 Department target and collection reports
+Route::middleware('auth:sanctum')->prefix('department-collection')->group(function () {
+    Route::get('/', [DepartmentCollectionController::class, 'index']);
+    Route::get('/departments', [DepartmentCollectionController::class, 'getDepartments']);
+    Route::post('/departments', [DepartmentCollectionController::class, 'storeDepartment']);
+    Route::put('/departments/{department}', [DepartmentCollectionController::class, 'updateDepartment']);
+    Route::delete('/departments/{department}', [DepartmentCollectionController::class, 'destroyDepartment']);
+    Route::post('/targets', [DepartmentCollectionController::class, 'storeTarget']);
+    Route::put('/departments/{department}/collections', [DepartmentCollectionController::class, 'updateMonthlyCollection']);
+});
+
 // 🧾 Certificate Management Routes
 Route::middleware('auth:sanctum')->prefix('certificates')->group(function () {
     Route::get('/', [CertificateController::class, 'index']);
@@ -229,6 +260,18 @@ Route::middleware('auth:sanctum')->prefix('certificates')->group(function () {
     Route::get('/templates', [CertificateController::class, 'getTemplates']);
 });
 
+// 🐄 Slaughterhouse Collection Management Routes
+Route::middleware('auth:sanctum')->prefix('slaughterhouse')->group(function () {
+    Route::get('/collections', [SlaughterhouseCollectionController::class, 'index']);
+    Route::get('/collections/monthly-summary', [SlaughterhouseCollectionController::class, 'monthlySummary']);
+    Route::get('/collections/daily-details', [SlaughterhouseCollectionController::class, 'dailyDetails']);
+    Route::get('/collections/daily-summary', [SlaughterhouseCollectionController::class, 'dailySummary']);
+    Route::get('/collections/{id}', [SlaughterhouseCollectionController::class, 'show']);
+    Route::post('/collections', [SlaughterhouseCollectionController::class, 'store']);
+    Route::put('/collections/{id}', [SlaughterhouseCollectionController::class, 'update']);
+    Route::delete('/collections/{id}', [SlaughterhouseCollectionController::class, 'destroy']);
+});
+
 // � Vendor Payment Calendar Routes
 Route::middleware('auth:sanctum')->prefix('vendor-payment-calendar')->group(function () {
     Route::get('/', [VendorPaymentCalendarController::class, 'index']);
@@ -239,7 +282,16 @@ Route::middleware('auth:sanctum')->prefix('vendor-payment-calendar')->group(func
 // Dashboard Routes
 Route::middleware('auth:sanctum')->prefix('dashboard')->group(function () {
     Route::get('/stats', [AdminController::class, 'display']);
+    Route::get('/expected-collection-analysis', [AdminController::class, 'expectedCollectionAnalysis']);
   
+});
+
+// Rental report routes
+Route::middleware('auth:sanctum')->group(function () {
+    Route::get('/reports/rental-report', [RentalReportController::class, 'rentalReport']);
+    Route::get('/reports/vendor-details', [RentalReportController::class, 'vendorDetails']);
+    Route::put('/rented/{id}/update-rented-at', [RentalReportController::class, 'updateRentedAt']);
+    Route::delete('/rented/{id}/delete-record', [RentalReportController::class, 'deleteRecord']);
 });
 
 
@@ -269,6 +321,7 @@ Route::middleware('auth:sanctum')->prefix('cash-ticket-types')->group(function (
 // Vendor Analysis Routes
 Route::prefix('vendor-analysis')->group(function () {
     Route::get('/vendors', [VendorAnalysisController::class, 'getVendors']);
+    Route::get('/vendor/{vendorId}/payment-details', [VendorAnalysisController::class, 'getVendorPaymentDetails']);
     Route::get('/vendor/{vendorId}', [VendorAnalysisController::class, 'getVendorAnalysis']);
     Route::post('/update-or-numbers', [VendorAnalysisController::class, 'updateOrNumbersForDate']);
     Route::get('/get-or-numbers', [VendorAnalysisController::class, 'getOrNumbersForDate']);
@@ -279,6 +332,8 @@ Route::prefix('vendor-analysis')->group(function () {
 
 // 📈 Stall Rate History Routes
 Route::prefix('stall-rate-history')->group(function () {
+    Route::get('/stall/{stallId}/recent', [StallRateHistoryController::class, 'getRecentStallRateChanges']);
+
     // Get rate history for a specific stall
     Route::get('/stall/{stallId}', [StallRateHistoryController::class, 'getStallRateHistory']);
     
@@ -304,6 +359,8 @@ Route::middleware('auth:sanctum')->prefix('products')->group(function () {
     Route::put('/{id}', [MarketProductController::class, 'update']);
     Route::delete('/{id}', [MarketProductController::class, 'destroy']);
     Route::get('/category/{categoryId}', [MarketProductController::class, 'getByCategory']);
+    Route::get('/{id}/price-history', [MarketProductController::class, 'priceHistory']);
+Route::get('/{id}/price-history/date-range', [MarketProductController::class, 'priceHistoryByDateRange']);
 });
 
 // 📂 Category Management Routes
@@ -318,6 +375,8 @@ Route::middleware('auth:sanctum')->prefix('categories')->group(function () {
 // 🏪 Public Available Products Routes (No Authentication Required)
 Route::prefix('public')->group(function () {
     Route::get('/available-stalls', [AvailableStallController::class, 'index']);
+    Route::get('/product-catalog', [AvailableProductsController::class, 'getCatalog']);
+    Route::get('/price-history', [AvailableProductsController::class, 'getPriceHistory']);
     Route::get('/categories', [AvailableProductsController::class, 'getCategories']);
     Route::get('/products', [AvailableProductsController::class, 'getAllProducts']);
     Route::get('/products/available', [AvailableProductsController::class, 'getAvailableProducts']);

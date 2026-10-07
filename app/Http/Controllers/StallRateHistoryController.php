@@ -3,12 +3,9 @@
 namespace App\Http\Controllers;
 
 use App\Models\Area;
-use App\Models\Rented;
-use App\Models\Sections;
 use App\Models\StallRateHistory;
 use App\Models\Stalls;
 use App\Services\StallRateHistoryService;
-use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Log;
 
 class StallRateHistoryController extends Controller
@@ -36,6 +33,20 @@ class StallRateHistoryController extends Controller
                 'monthly_rate' => $stall->monthly_rate,
             ]
         ]);
+    }
+
+    public function getRecentStallRateChanges($stallId)
+    {
+        Stalls::query()->select('id')->findOrFail($stallId);
+
+        $rateChanges = StallRateHistory::query()
+            ->where('stall_id', $stallId)
+            ->select('id', 'stall_id', 'daily_rate', 'monthly_rate', 'effective_from')
+            ->orderByDesc('effective_from')
+            ->limit(3)
+            ->get();
+
+        return response()->json(['rate_changes' => $rateChanges]);
     }
 
     /**
@@ -135,12 +146,53 @@ class StallRateHistoryController extends Controller
     public function getDashboardData()
     {
         try {
-            // Get all areas with their sections and stalls
-            $areas = Area::with(['sections.stalls' => function($query) {
-                $query->with(['currentRental', 'rateHistories' => function($rateQuery) {
-                    $rateQuery->orderBy('effective_from', 'desc')->limit(5);
-                }]);
-            }])->orderBy('sort_order')->get();
+            $areas = Area::query()
+                ->select('id', 'name', 'sort_order')
+                ->with(['sections' => function ($sectionQuery) {
+                    $sectionQuery->select(
+                        'id',
+                        'name',
+                        'area_id',
+                        'rate_type',
+                        'rate',
+                        'daily_rate',
+                        'monthly_rate'
+                    )->with(['stalls' => function ($stallQuery) {
+                        $stallQuery->select(
+                            'id',
+                            'section_id',
+                            'stall_number',
+                            'status',
+                            'size',
+                            'row_position',
+                            'column_position',
+                            'daily_rate',
+                            'monthly_rate'
+                        )->with([
+                            'currentRental' => function ($rentalQuery) {
+                                $rentalQuery->select(
+                                    'id',
+                                    'stall_id',
+                                    'vendor_id',
+                                    'status',
+                                    'daily_rent',
+                                    'monthly_rent'
+                                )->with('vendor:id,first_name,middle_name,last_name');
+                            },
+                            'rateHistories' => function ($rateQuery) {
+                                $rateQuery->select(
+                                    'id',
+                                    'stall_id',
+                                    'daily_rate',
+                                    'monthly_rate',
+                                    'effective_from'
+                                )->orderByDesc('effective_from')->limit(1);
+                            },
+                        ]);
+                    }]);
+                }])
+                ->orderBy('sort_order')
+                ->get();
 
             // Process data for dashboard
             $dashboardData = [];
@@ -168,7 +220,6 @@ class StallRateHistoryController extends Controller
                     foreach ($section->stalls as $stall) {
                         $stallStatus = $this->getStallStatus($stall);
                         $currentRate = $this->getCurrentRate($stall);
-                        $recentRateChanges = $this->getRecentRateChanges($stall);
 
                         // Calculate rates based on section rate type
                         // First check if stall has individual rates (highest priority)
@@ -198,7 +249,6 @@ class StallRateHistoryController extends Controller
                             'stall_number' => $stall->stall_number,
                             'status' => $stallStatus,
                             'current_rate' => $calculatedRate,
-                            'rate_changes' => $recentRateChanges,
                             'size' => $stall->size,
                             'position' => [
                                 'row' => $stall->row_position,
@@ -238,7 +288,9 @@ class StallRateHistoryController extends Controller
             }
 
             // Get recent rate changes across all stalls
-            $recentRateChanges = StallRateHistory::with(['stall.section.area'])
+            $recentRateChanges = StallRateHistory::query()
+                ->select('id', 'stall_id', 'daily_rate', 'monthly_rate', 'effective_from', 'created_at')
+                ->with(['stall:id,stall_number,section_id', 'stall.section:id,name'])
                 ->orderBy('effective_from', 'desc')
                 ->limit(20)
                 ->get()
@@ -249,13 +301,11 @@ class StallRateHistoryController extends Controller
                             'id' => $history->stall->id,
                             'number' => $history->stall->stall_number,
                             'section' => $history->stall->section->name ?? 'Unknown',
-                            'area' => $history->stall->section->area->name ?? 'Unknown'
                         ],
                         'daily_rate' => $history->daily_rate,
                         'monthly_rate' => $history->monthly_rate,
                         'effective_from' => $history->effective_from,
                         'created_at' => $history->created_at,
-                        'change_type' => $this->determineChangeType($history)
                     ];
                 });
 
@@ -314,45 +364,6 @@ class StallRateHistoryController extends Controller
             'monthly_rate' => $rateHistory ? $rateHistory->monthly_rate : $stall->monthly_rate,
             'effective_from' => $rateHistory ? $rateHistory->effective_from : null
         ];
-    }
-
-    /**
-     * Get recent rate changes for stall
-     */
-    private function getRecentRateChanges($stall)
-    {
-        return $stall->rateHistories->take(3)->map(function($history) {
-            return [
-                'daily_rate' => $history->daily_rate,
-                'monthly_rate' => $history->monthly_rate,
-                'effective_from' => $history->effective_from
-            ];
-        });
-    }
-
-    /**
-     * Determine the type of rate change
-     */
-    private function determineChangeType($history)
-    {
-        $previousHistory = StallRateHistory::where('stall_id', $history->stall_id)
-            ->where('effective_from', '<', $history->effective_from)
-            ->orderBy('effective_from', 'desc')
-            ->first();
-
-        if (!$previousHistory) {
-            return 'initial';
-        }
-
-        if ($history->daily_rate > $previousHistory->daily_rate || 
-            $history->monthly_rate > $previousHistory->monthly_rate) {
-            return 'increase';
-        } elseif ($history->daily_rate < $previousHistory->daily_rate || 
-                  $history->monthly_rate < $previousHistory->monthly_rate) {
-            return 'decrease';
-        }
-
-        return 'unchanged';
     }
 
     /**

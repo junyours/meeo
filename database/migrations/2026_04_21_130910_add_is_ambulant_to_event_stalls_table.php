@@ -2,6 +2,7 @@
 
 use Illuminate\Database\Migrations\Migration;
 use Illuminate\Database\Schema\Blueprint;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Schema;
 
 return new class extends Migration
@@ -19,7 +20,7 @@ return new class extends Migration
             
             // Make stall_number nullable for ambulant stalls (only if it's not already nullable)
             if (Schema::hasColumn('event_stalls', 'stall_number')) {
-                \DB::statement('ALTER TABLE event_stalls MODIFY stall_number VARCHAR(255) NULL');
+                DB::statement('ALTER TABLE event_stalls MODIFY stall_number VARCHAR(255) NULL');
             }
         });
     }
