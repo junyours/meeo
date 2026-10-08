@@ -2,8 +2,8 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
 
 class CollectionSession extends Model
 {
@@ -20,6 +20,7 @@ class CollectionSession extends Model
         'verified_by',
         'verified_at',
         'remarks',
+        'turnover_client_id',
     ];
 
     protected $casts = [
@@ -51,6 +52,14 @@ class CollectionSession extends Model
     {
         return $this->hasMany(
             Collection::class,
+            'collection_session_id'
+        );
+    }
+
+    public function turnovers()
+    {
+        return $this->hasMany(
+            CollectionTurnover::class,
             'collection_session_id'
         );
     }

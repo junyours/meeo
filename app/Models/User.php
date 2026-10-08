@@ -2,7 +2,6 @@
 
 namespace App\Models;
 
-// use Illuminate\Contracts\Auth\MustVerifyEmail;
 use App\Models\Collection;
 use App\Models\CollectionSession;
 use App\Models\VendorDetails;
@@ -11,69 +10,53 @@ use Illuminate\Foundation\Auth\User as Authenticatable;
 use Illuminate\Notifications\Notifiable;
 use Laravel\Sanctum\HasApiTokens;
 
-
 class User extends Authenticatable
 {
     use HasApiTokens, HasFactory, Notifiable;
 
-
-    /**
-     * The attributes that are mass assignable.
-     *
-     * @var array<int, string>
-     */
     protected $fillable = [
-   
         'email',
         'username',
         'password',
         'role',
     ];
+
     public function collectionSessions()
-{
-    return $this->hasMany(
-        CollectionSession::class,
-        'collector_id'
-    );
-}
+    {
+        return $this->hasMany(
+            CollectionSession::class,
+            'collector_id'
+        );
+    }
 
-public function collections()
-{
-    return $this->hasMany(
-        Collection::class,
-        'collector_id'
-    );
-}
+    public function collections()
+    {
+        return $this->hasMany(
+            Collection::class,
+            'collector_id'
+        );
+    }
 
-public function verifiedCollectionSessions()
-{
-    return $this->hasMany(
-        CollectionSession::class,
-        'verified_by'
-    );
-}
+    public function verifiedCollectionSessions()
+    {
+        return $this->hasMany(
+            CollectionSession::class,
+            'verified_by'
+        );
+    }
 
     public function vendor()
-{
-    return $this->hasOne(VendorDetails::class, 'user_id');
-}
-    /**
-     * The attributes that should be hidden for serialization.
-     *
-     * @var array<int, string>
-     */
+    {
+        return $this->hasOne(
+            VendorDetails::class,
+            'user_id'
+        );
+    }
+
     protected $hidden = [
         'password',
         'remember_token',
     ];
 
-    /**
-     * The attributes that should be cast.
-     *
-     * @var array<string, string>
-     */
-    protected $casts = [
-      
-        'password' => 'hashed',
-    ];
+    protected $casts = [];
 }

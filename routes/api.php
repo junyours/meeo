@@ -20,6 +20,8 @@ use App\Http\Controllers\EventStallController;
 use App\Http\Controllers\EventVendorController;
 use App\Http\Controllers\MarketLayoutController;
 use App\Http\Controllers\MarketOpenSpaceController;
+use App\Http\Controllers\Mobile\MobileAuthController;
+use App\Http\Controllers\Mobile\MobileCollectorController;
 use App\Http\Controllers\OfficeActivitiesController;
 use App\Http\Controllers\PaymentManagementController;
 use App\Http\Controllers\PaymentMonitoringController;
@@ -43,6 +45,23 @@ use Illuminate\Support\Facades\Route;
 |--------------------------------------------------------------------------
 | Grouped by controller for clarity
 */
+Route::prefix('mobile')->group(function () {
+    Route::post('/login', [MobileAuthController::class, 'login']);
+
+    Route::middleware('auth:sanctum')->group(function () {
+        Route::get('/profile', [MobileAuthController::class, 'profile']);
+        Route::post('/logout', [MobileAuthController::class, 'logout']);
+        Route::get('/bootstrap', [MobileCollectorController::class, 'bootstrap']);
+        Route::get('/vendors/search', [MobileCollectorController::class, 'search']);
+        Route::get('/vendors/qr/{token}', [MobileCollectorController::class, 'scan']);
+        Route::post('/collections/quote', [MobileCollectorController::class, 'quote']);
+        Route::post('/collections', [MobileCollectorController::class, 'createCollection']);
+        Route::get('/collections', [MobileCollectorController::class, 'collections']);
+        Route::post('/collections/{collection}/collect', [MobileCollectorController::class, 'markCollected']);
+        Route::post('/turnover', [MobileCollectorController::class, 'turnover']);
+    });
+});
+
 // Admin Profile Routes
 Route::middleware('auth:sanctum')->prefix('admin')->group(function () {
     Route::get('/profile', [AdminProfileController::class, 'getProfile']);

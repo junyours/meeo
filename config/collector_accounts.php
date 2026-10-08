@@ -1,5 +1,13 @@
 <?php
 
 return [
-    'default_password' => env('COLLECTOR_DEFAULT_PASSWORD', 'p@ssword123'),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Default Collector/Staff Password
+    |--------------------------------------------------------------------------
+    */
+
+    'default_password' => 'p@ssword123',
+
 ];

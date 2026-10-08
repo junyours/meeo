@@ -2,8 +2,8 @@
 
 namespace App\Models;
 
-use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
 
 class Collection extends Model
 {
@@ -11,6 +11,7 @@ class Collection extends Model
 
     protected $fillable = [
         'collection_session_id',
+        'collection_turnover_id',
         'vendor_id',
         'rented_id',
         'stall_id',
@@ -20,6 +21,9 @@ class Collection extends Model
         'payment_type',
         'is_collected',
         'collected_at',
+        'client_transaction_id',
+        'payment_id',
+        'rental_snapshot',
     ];
 
     protected $casts = [
@@ -29,6 +33,7 @@ class Collection extends Model
         'collected_at' => 'datetime',
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
+        'rental_snapshot' => 'array',
     ];
 
     public function session()
@@ -37,6 +42,11 @@ class Collection extends Model
             CollectionSession::class,
             'collection_session_id'
         );
+    }
+
+    public function turnover()
+    {
+        return $this->belongsTo(CollectionTurnover::class, 'collection_turnover_id');
     }
 
     public function vendor()
@@ -68,6 +78,14 @@ class Collection extends Model
         return $this->belongsTo(
             User::class,
             'collector_id'
+        );
+    }
+
+    public function payment()
+    {
+        return $this->belongsTo(
+            Payments::class,
+            'payment_id'
         );
     }
 }

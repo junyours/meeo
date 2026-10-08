@@ -717,6 +717,18 @@ public function index()
     /**
      * Process payment for a single rental (extracted from payMissedForRented)
      */
+    public function processMobilePaymentForRental($rental, $amount, $paymentType, $paymentDate, $frontendAdvanceDays = null, $orNumber = null)
+    {
+        return $this->processPaymentForRental(
+            $rental,
+            $amount,
+            $paymentType,
+            $paymentDate,
+            $frontendAdvanceDays,
+            $orNumber
+        );
+    }
+
     private function processPaymentForRental($rental, $amount, $paymentType, $paymentDate, $frontendAdvanceDays = null, $orNumber = null)
     {
         // Check if rental is unoccupied before processing payment
@@ -733,7 +745,10 @@ public function index()
         
         $missedDays = (int) ($rental->missed_days ?? 0);
         $dailyRent = (float) ($rental->daily_rent ?? 0);
-        $monthlyRent = (float) ($rental->monthly_rent ?: ($rental->stall->monthly_rate ?? 0));
+        $monthlyRent = (float) ($rental->monthly_rent ?? 0);
+        if ($monthlyRent <= 0) {
+            $monthlyRent = (float) ($rental->stall->monthly_rate ?? 0);
+        }
 
         // For monthly stalls, daily rent should be 0 and we use monthly rent
         if ($isMonthlyStall) {
