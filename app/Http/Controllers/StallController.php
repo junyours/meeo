@@ -201,6 +201,11 @@ class StallController extends Controller
 
         return DB::transaction(function () use ($request, $id) {
             $stall = Stalls::findOrFail($id);
+            $effectiveDate = \Carbon\Carbon::parse($request->input('effective_date', now()->toDateString()))->toDateString();
+            $effectiveRates = $this->rateHistoryService->getRatesForDate($stall->id, $effectiveDate);
+            $previousDailyRate = $effectiveRates?->daily_rate ?? $stall->daily_rate;
+            $previousMonthlyRate = $effectiveRates?->monthly_rate ?? $stall->monthly_rate;
+            $previousAnnualRate = $effectiveRates?->annual_rate ?? $stall->annual_rate;
             
             // Debug logging
             Log::info('Updating stall rent', [
@@ -216,31 +221,32 @@ class StallController extends Controller
 
             // Check if rates are actually changing
             $ratesChanged = (
-                ($request->daily_rate != $stall->daily_rate) || 
-                ($request->monthly_rate != $stall->monthly_rate) ||
-                ($request->annual_rate != $stall->annual_rate) ||
+                ($request->daily_rate != $previousDailyRate) ||
+                ($request->monthly_rate != $previousMonthlyRate) ||
+                ($request->annual_rate != $previousAnnualRate) ||
                 ($request->has('is_monthly') && $request->is_monthly != $stall->is_monthly)
             );
             
             Log::info('Rates changed check', ['ratesChanged' => $ratesChanged]);
 
-            // Update stall rent rates
-            $updateData = [
-                'daily_rate'   => $request->daily_rate,
-                'monthly_rate' => $request->monthly_rate,
-                'annual_rate'  => $request->annual_rate,
-            ];
-            
-            // Update is_monthly if provided
-            if ($request->has('is_monthly')) {
-                $updateData['is_monthly'] = $request->is_monthly;
+            if ($ratesChanged) {
+                $this->rateHistoryService->initializeRateHistoryForStall($stall->id);
             }
-            
-            $stall->update($updateData);
 
-            // Create rate history record if rates changed AND effective date is provided
-            $effectiveDate = $request->input('effective_date');
-            if ($ratesChanged && !empty($effectiveDate)) {
+            $today = now()->toDateString();
+            if ($effectiveDate <= $today) {
+                $updateData = [
+                    'daily_rate'   => $request->daily_rate,
+                    'monthly_rate' => $request->monthly_rate,
+                    'annual_rate'  => $request->annual_rate,
+                ];
+                if ($request->has('is_monthly')) {
+                    $updateData['is_monthly'] = $request->is_monthly;
+                }
+                $stall->update($updateData);
+            }
+
+            if ($ratesChanged) {
                 Log::info('Creating rate history', [
                     'stall_id' => $id,
                     'daily_rate' => $request->daily_rate,
@@ -249,33 +255,19 @@ class StallController extends Controller
                     'effective_date' => $effectiveDate
                 ]);
                 
-                try {
-                    $rateHistory = $this->rateHistoryService->createRateHistory(
-                        $id,
-                        $request->daily_rate,
-                        $request->monthly_rate,
-                        $effectiveDate,
-                        $request->annual_rate
-                    );
-                    Log::info('Rate history created successfully', ['rate_history_id' => $rateHistory->id]);
-                } catch (\Exception $e) {
-                    Log::error('Failed to create rate history', [
-                        'error' => $e->getMessage(),
-                        'trace' => $e->getTraceAsString()
-                    ]);
-                    // Don't fail the whole transaction if rate history fails
-                }
-            } elseif ($ratesChanged && empty($effectiveDate)) {
-                Log::info('Rates changed but no effective date provided, skipping rate history creation');
+                $rateHistory = $this->rateHistoryService->createRateHistory(
+                    $id,
+                    $request->daily_rate,
+                    $request->monthly_rate,
+                    $effectiveDate,
+                    $request->annual_rate
+                );
+                Log::info('Rate history created successfully', ['rate_history_id' => $rateHistory->id]);
             } else {
                 Log::info('Rates did not change, skipping history creation');
             }
 
-            // Find and update active rented records for this stall
-            // Only update if effective date is today or in the past
-            $today = now()->toDateString();
-            $effectiveDate = $request->input('effective_date', $today);
-            $shouldUpdateRentedRecords = ($effectiveDate <= $today);
+            $shouldUpdateRentedRecords = $effectiveDate <= $today;
             
             $updatedRentedCount = 0;
             if ($shouldUpdateRentedRecords) {
@@ -310,7 +302,7 @@ class StallController extends Controller
                 'data'    => $stall->load('section'),
                 'updated_rented_records' => $updatedRentedCount,
                 'rate_history_created' => $ratesChanged,
-                'effective_date' => $request->input('effective_date', now()->toDateString())
+                'effective_date' => $effectiveDate
             ]);
         });
     }
@@ -777,24 +769,6 @@ private function calculateRentalAnalysisBalance(Rented $rented, Stalls $stall, ?
 
     for ($month = 1; $month <= 12; $month++) {
         $daysInMonth = Carbon::create($year, $month, 1)->daysInMonth;
-        $historicalDailyRate = $this->rateHistoryService->getDailyRateForMonth($stall->id, $year, $month);
-        $historicalMonthlyRate = $this->rateHistoryService->getMonthlyRateForMonth($stall->id, $year, $month);
-        $hasStallDailyRate = !is_null($historicalDailyRate) && $historicalDailyRate > 0;
-        $hasStallMonthlyRate = !is_null($historicalMonthlyRate) && $historicalMonthlyRate > 0;
-
-        if ($hasStallDailyRate && $hasStallMonthlyRate) {
-            if ($stall->is_monthly || ($stall->stall_number == 16 && strtolower($section->name) === 'meat & fish')) {
-                $dailyRate = $historicalMonthlyRate / $daysInMonth;
-            } else {
-                $dailyRate = $historicalDailyRate;
-            }
-        } elseif ($section->rate_type === 'fixed') {
-            $dailyRate = (float) ($section->monthly_rate ?? 0) / $daysInMonth;
-        } else {
-            $dailyRate = $hasStallDailyRate
-                ? $historicalDailyRate
-                : (float) ($rented->daily_rent ?? 0);
-        }
 
         $monthlyRate = 0;
         for ($day = 1; $day <= $daysInMonth; $day++) {
@@ -803,7 +777,7 @@ private function calculateRentalAnalysisBalance(Rented $rented, Stalls $stall, ?
                 continue;
             }
 
-            $monthlyRate += $dailyRate;
+            $monthlyRate += $this->rateHistoryService->getDailyRentForRentalDate($rented, $currentDay);
         }
 
         $monthlyPayments = $rented->payments

@@ -3,12 +3,17 @@
 namespace App\Http\Controllers;
 
 use App\Models\Rented;
+use App\Services\StallRateHistoryService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class RentalReportController extends Controller
 {
+    public function __construct(private StallRateHistoryService $rateHistoryService)
+    {
+    }
+
     private const REPORT_STATUSES = [
         'active',
         'occupied',
@@ -25,7 +30,7 @@ class RentalReportController extends Controller
             ->select(['id', 'vendor_id', 'stall_id', 'status', 'daily_rent', 'monthly_rent', 'created_at'])
             ->with([
                 'vendor:id,first_name,middle_name,last_name',
-                'stall:id,stall_number,section_id',
+                'stall:id,stall_number,section_id,daily_rate,monthly_rate',
                 'stall.section:id,name',
             ])
             ->whereIn('status', self::REPORT_STATUSES)
@@ -53,8 +58,12 @@ class RentalReportController extends Controller
                         ->implode(', '),
                     'stall_numbers' => $currentStallRentals->map(fn ($rental) => $rental->stall->stall_number)->unique()->values(),
                     'rental_statuses' => [$displayStatus],
-                    'daily_rental_total' => (float) $rentableStalls->sum('daily_rent'),
-                    'monthly_rental_total' => (float) $rentableStalls->sum('monthly_rent'),
+                    'daily_rental_total' => (float) $rentableStalls->sum(
+                        fn ($rental) => $this->getRatesForRental($rental, now())['daily']
+                    ),
+                    'monthly_rental_total' => (float) $rentableStalls->sum(
+                        fn ($rental) => $this->getRatesForRental($rental, now())['monthly']
+                    ),
                 ];
             })
             ->values();
@@ -89,7 +98,7 @@ class RentalReportController extends Controller
             ])
             ->with([
                 'vendor:id,first_name,middle_name,last_name',
-                'stall:id,stall_number,section_id',
+                'stall:id,stall_number,section_id,daily_rate,monthly_rate',
                 'stall.section:id,name',
             ])
             ->whereIn('status', self::REPORT_STATUSES)
@@ -109,14 +118,19 @@ class RentalReportController extends Controller
         $currentStallRentals = $this->currentRentalPerStall($rentals);
         $rentableStalls = $currentStallRentals->filter(fn ($rental) => $rental->status !== 'unoccupied');
         $stallDetails = $rentals->map(function ($rental) {
+            $rateDate = $rental->status === 'unoccupied'
+                ? ($rental->updated_at ?? $rental->created_at)
+                : now();
+            $rates = $this->getRatesForRental($rental, $rateDate);
+
             return [
                 'rented_id' => $rental->id,
                 'section_name' => $rental->stall?->section?->name,
                 'stall_number' => $rental->stall?->stall_number,
                 'status' => $rental->status,
                 'end_date' => $rental->status === 'unoccupied' ? $rental->updated_at?->toISOString() : null,
-                'daily_rent' => (float) $rental->daily_rent,
-                'monthly_rent' => (float) $rental->monthly_rent,
+                'daily_rent' => $rates['daily'],
+                'monthly_rent' => $rates['monthly'],
                 'created_at' => $rental->created_at?->toISOString(),
                 'last_payment_date' => $rental->last_payment_date?->toISOString(),
             ];
@@ -128,8 +142,12 @@ class RentalReportController extends Controller
                 'vendor_name' => $firstRental->vendor->full_name,
                 'total_stalls' => $currentStallRentals->count(),
                 'section_name' => $rentals->pluck('stall.section.name')->filter()->unique()->implode(', '),
-                'total_daily_rental' => (float) $rentableStalls->sum('daily_rent'),
-                'total_monthly_rental' => (float) $rentableStalls->sum('monthly_rent'),
+                'total_daily_rental' => (float) $rentableStalls->sum(
+                    fn ($rental) => $this->getRatesForRental($rental, now())['daily']
+                ),
+                'total_monthly_rental' => (float) $rentableStalls->sum(
+                    fn ($rental) => $this->getRatesForRental($rental, now())['monthly']
+                ),
                 'stall_details' => $stallDetails,
             ],
         ]);
@@ -144,6 +162,16 @@ class RentalReportController extends Controller
                     ?? $stallRentals->first();
             })
             ->values();
+    }
+
+    private function getRatesForRental(Rented $rental, $date): array
+    {
+        $history = $this->rateHistoryService->getRatesForDate($rental->stall_id, $date);
+
+        return [
+            'daily' => (float) ($history?->daily_rate ?? $rental->daily_rent ?? $rental->stall->daily_rate ?? 0),
+            'monthly' => (float) ($history?->monthly_rate ?? $rental->monthly_rent ?? $rental->stall->monthly_rate ?? 0),
+        ];
     }
 
     public function updateRentedAt(Request $request, $id)

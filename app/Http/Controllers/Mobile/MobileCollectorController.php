@@ -7,6 +7,7 @@ use App\Http\Controllers\VendorPaymentController;
 use App\Models\Collection;
 use App\Models\CollectionSession;
 use App\Models\CollectionTurnover;
+use App\Models\Payments;
 use App\Models\Rented;
 use App\Models\VendorDetails;
 use App\Models\VendorQrCode;
@@ -136,11 +137,41 @@ class MobileCollectorController extends Controller
     public function quote(Request $request)
     {
         $validated = $request->validate([
-            'rented_id' => ['required_without:rented_ids', 'integer'],
-            'rented_ids' => ['required_without:rented_id', 'array', 'min:1', 'max:20'],
+            'rented_id' => ['required_without_all:rented_ids,allocations', 'integer'],
+            'rented_ids' => ['required_without_all:rented_id,allocations', 'array', 'min:1', 'max:20'],
             'rented_ids.*' => ['required', 'integer', 'distinct'],
-            'amount_to_pay' => ['required', 'numeric', 'min:0.01'],
+            'amount_to_pay' => ['required_without:allocations', 'numeric', 'min:0.01'],
+            'allocations' => ['sometimes', 'array', 'min:1', 'max:20'],
+            'allocations.*.rented_id' => ['required_with:allocations', 'integer', 'distinct'],
+            'allocations.*.amount_to_pay' => ['required_with:allocations', 'numeric', 'min:0.01'],
         ]);
+
+        if (isset($validated['allocations'])) {
+            $requestedAllocations = collect($validated['allocations'])
+                ->keyBy(fn (array $allocation) => (int) $allocation['rented_id']);
+            $rentals = $this->loadCollectionRentals($requestedAllocations->keys()->all());
+            $allocations = [];
+            foreach ($rentals as $rental) {
+                $amount = (float) $requestedAllocations->get($rental->id)['amount_to_pay'];
+                $allocations[] = [
+                    'rented_id' => $rental->id,
+                    'stall_number' => $rental->stall?->stall_number ?? '—',
+                    'section_name' => $rental->stall?->section?->name ?? '—',
+                    'amount_to_pay' => number_format($amount, 2, '.', ''),
+                    ...$this->paymentQuote($rental, $amount),
+                ];
+            }
+            $total = array_sum(array_column($allocations, 'amount_to_pay'));
+
+            return response()->json([
+                'amount_to_pay' => number_format($total, 2, '.', ''),
+                'payment_type' => count(array_unique(array_column($allocations, 'payment_type'))) === 1
+                    ? $allocations[0]['payment_type']
+                    : 'combined',
+                'days_covered' => array_sum(array_column($allocations, 'days_covered')),
+                'allocations' => $allocations,
+            ]);
+        }
 
         $amount = (float) $validated['amount_to_pay'];
         $rentedIds = $validated['rented_ids'] ?? [$validated['rented_id']];
@@ -196,6 +227,7 @@ class MobileCollectorController extends Controller
             'rental_snapshot.is_monthly' => ['required_with:rental_snapshot', 'boolean'],
             'allocations' => ['required_without:rented_id', 'array', 'min:1', 'max:20'],
             'allocations.*.rented_id' => ['required', 'integer', 'distinct'],
+            'allocations.*.amount_to_pay' => ['sometimes', 'numeric', 'min:0.01'],
             'allocations.*.rental_snapshot' => ['required', 'array'],
             'allocations.*.rental_snapshot.status' => ['required', 'string'],
             'allocations.*.rental_snapshot.daily_rent' => ['required', 'numeric'],
@@ -219,12 +251,8 @@ class MobileCollectorController extends Controller
             ->get();
         if ($existing->isNotEmpty()) {
             abort_unless($existing->every(fn ($item) => $item->collector_id === $request->user()->id), 403);
-            $existingIds = $existing->pluck('rented_id')->map(fn ($id) => (int) $id)->all();
-            sort($requestedIds);
-            sort($existingIds);
             abort_if(
-                $existingIds !== $requestedIds
-                || round((float) $existing->sum('amount_to_pay'), 2) !== round((float) $validated['amount_to_pay'], 2),
+                ! $this->collectionRequestMatches($existing, $requestedAllocations, (float) $validated['amount_to_pay']),
                 409,
                 'This transaction identifier has already been used for different collection details.'
             );
@@ -252,14 +280,9 @@ class MobileCollectorController extends Controller
                 ->lockForUpdate()
                 ->get();
             if ($existing->isNotEmpty()) {
-                $existingIds = $existing->pluck('rented_id')->map(fn ($id) => (int) $id)->all();
-                sort($existingIds);
-                $sortedRequestedIds = $requestedIds;
-                sort($sortedRequestedIds);
                 abort_unless($existing->every(fn ($item) => $item->collector_id === $request->user()->id), 403);
                 abort_if(
-                    $existingIds !== $sortedRequestedIds
-                    || round((float) $existing->sum('amount_to_pay'), 2) !== round((float) $validated['amount_to_pay'], 2),
+                    ! $this->collectionRequestMatches($existing, $requestedAllocations, (float) $validated['amount_to_pay']),
                     409,
                     'This transaction identifier has already been used for different collection details.'
                 );
@@ -282,6 +305,25 @@ class MobileCollectorController extends Controller
             }
 
             $rentals = $this->loadCollectionRentals($requestedIds, true);
+            $providedAmounts = collect($requestedAllocations)
+                ->filter(fn (array $allocation) => array_key_exists('amount_to_pay', $allocation));
+            if ($providedAmounts->isNotEmpty()) {
+                abort_unless(
+                    $providedAmounts->count() === count($requestedAllocations),
+                    422,
+                    'Every selected stall must include its payment amount.'
+                );
+                $shares = $providedAmounts->mapWithKeys(fn (array $allocation) => [
+                    (int) $allocation['rented_id'] => round((float) $allocation['amount_to_pay'], 2),
+                ])->all();
+                abort_unless(
+                    round(array_sum($shares), 2) === round((float) $validated['amount_to_pay'], 2),
+                    422,
+                    'The stall payment amounts must equal the combined collection amount.'
+                );
+            } else {
+                $shares = $this->allocateAmountByDailyRent($rentals, (float) $validated['amount_to_pay']);
+            }
             $snapshots = [];
             foreach ($requestedAllocations as $allocation) {
                 $rental = collect($rentals)->firstWhere('id', (int) $allocation['rented_id']);
@@ -293,8 +335,6 @@ class MobileCollectorController extends Controller
                 $snapshots[$rental->id] = $snapshot;
             }
 
-            $amount = (float) $validated['amount_to_pay'];
-            $shares = $this->allocateAmountByDailyRent($rentals, $amount);
             $rows = new EloquentCollection(collect($rentals)->map(function ($rental) use ($request, $session, $validated, $shares, $snapshots) {
                 $share = $shares[$rental->id];
                 $quote = $this->paymentQuote($rental, $share);
@@ -328,8 +368,11 @@ class MobileCollectorController extends Controller
     public function markCollected(Request $request, Collection $collection)
     {
         abort_unless($collection->collector_id === $request->user()->id, 404);
+        $validated = $request->validate([
+            'or_number' => ['required', 'string', 'regex:/^\d{7}$/'],
+        ]);
 
-        $result = DB::transaction(function () use ($collection) {
+        $result = DB::transaction(function () use ($collection, $validated) {
             $session = CollectionSession::query()
                 ->lockForUpdate()
                 ->findOrFail($collection->collection_session_id);
@@ -343,7 +386,12 @@ class MobileCollectorController extends Controller
                 ->get();
 
             if ($rows->every(fn ($row) => $row->is_collected)) {
-                $rows->load(['vendor', 'stall.section']);
+                $rows->load(['vendor', 'stall.section', 'payment']);
+                abort_unless(
+                    $rows->every(fn (Collection $row) => (string) ($row->payment?->or_number ?? '') === $validated['or_number']),
+                    409,
+                    'This collection has already been recorded with a different OR number.'
+                );
 
                 return $this->formatCollectionGroup($rows);
             }
@@ -363,13 +411,16 @@ class MobileCollectorController extends Controller
                 abort_unless(in_array($rental->status, self::CURRENT_RENTAL_STATUSES, true), 409, 'This rental is no longer active.');
                 $this->assertRentalSnapshotMatches($rental, $row->rental_snapshot);
                 $quote = $this->paymentQuote($rental, (float) $row->amount_to_pay);
-                $processed = $this->payments->processMobilePaymentForRental(
-                    $rental,
-                    (float) $row->amount_to_pay,
-                    $quote['payment_type'],
-                    now(),
-                    $quote['advance_days'] ?: null
-                );
+                $processed = $rental->stall?->is_monthly && in_array($quote['payment_type'], ['partial', 'advance'], true)
+                    ? $this->processMobileMonthlyPayment($rental, (float) $row->amount_to_pay, $quote, now(), $validated['or_number'])
+                    : $this->payments->processMobilePaymentForRental(
+                        $rental,
+                        (float) $row->amount_to_pay,
+                        $quote['payment_type'],
+                        now(),
+                        $quote['advance_days'] ?: null,
+                        $validated['or_number']
+                    );
                 abort_unless($processed['success'] ?? false, 422, $processed['message'] ?? 'Payment could not be processed.');
 
                 $row->payment_id = $processed['payment']->id;
@@ -389,6 +440,7 @@ class MobileCollectorController extends Controller
                 $rowsQuery->whereKey($collection->id);
             }
             $rows = $rowsQuery->get();
+            $rows->loadMissing('payment');
             if ($session->status === 'submitted' && $rows->contains(
                 fn (Collection $row) => $row->collection_turnover_id === null
             )) {
@@ -432,7 +484,7 @@ class MobileCollectorController extends Controller
         }
 
         $this->refreshSessionTotals($session);
-        $session->load(['collections.vendor', 'collections.stall.section']);
+        $session->load(['collections.vendor', 'collections.stall.section', 'collections.payment']);
         $groups = $session->collections
             ->groupBy(fn ($item) => $item->client_transaction_id ?: "collection-{$item->id}")
             ->map(fn ($rows) => $this->formatCollectionGroup($rows))
@@ -520,8 +572,46 @@ class MobileCollectorController extends Controller
         return response()->json(['session' => $session]);
     }
 
+    private function collectionRequestMatches(
+        EloquentCollection $existing,
+        array $requestedAllocations,
+        float $requestedTotal
+    ): bool {
+        $existingIds = $existing->pluck('rented_id')->map(fn ($id) => (int) $id)->all();
+        $requestedIds = array_map('intval', array_column($requestedAllocations, 'rented_id'));
+        sort($existingIds);
+        sort($requestedIds);
+
+        if (
+            $existingIds !== $requestedIds
+            || round((float) $existing->sum('amount_to_pay'), 2) !== round($requestedTotal, 2)
+        ) {
+            return false;
+        }
+
+        $explicitAmounts = collect($requestedAllocations)
+            ->filter(fn (array $allocation) => array_key_exists('amount_to_pay', $allocation));
+        if ($explicitAmounts->isEmpty()) {
+            return true;
+        }
+        if ($explicitAmounts->count() !== count($requestedAllocations)) {
+            return false;
+        }
+
+        $existingByRental = $existing->keyBy('rented_id');
+        foreach ($explicitAmounts as $allocation) {
+            $saved = $existingByRental->get((int) $allocation['rented_id']);
+            if (! $saved || round((float) $saved->amount_to_pay, 2) !== round((float) $allocation['amount_to_pay'], 2)) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private function formatCollectionGroup(EloquentCollection $rows): Collection
     {
+        $rows->loadMissing('payment');
         /** @var Collection $primary */
         $primary = $rows->first();
         $amount = (float) $rows->sum('amount_to_pay');
@@ -536,6 +626,13 @@ class MobileCollectorController extends Controller
         );
         $primary->setAttribute('is_collected', $rows->every(fn ($row) => $row->is_collected));
         $primary->setAttribute(
+            'or_number',
+            $rows->map(fn ($row) => $row->payment?->or_number)
+                ->filter(fn ($orNumber) => $orNumber !== null)
+                ->map(fn ($orNumber) => (string) $orNumber)
+                ->first()
+        );
+        $primary->setAttribute(
             'collected_at',
             $rows->where('is_collected', true)->max('collected_at')
         );
@@ -549,9 +646,12 @@ class MobileCollectorController extends Controller
                 'days_covered' => $row->days_covered,
                 'payment_type' => $row->payment_type,
                 'rental_snapshot' => $row->rental_snapshot,
+                'or_number' => $row->payment?->or_number === null ? null : (string) $row->payment->or_number,
                 'stall' => $row->stall,
             ])->values());
         }
+
+        $primary->unsetRelation('payment');
 
         return $primary;
     }
@@ -672,11 +772,30 @@ class MobileCollectorController extends Controller
     private function formatVendor(VendorDetails $vendor): array
     {
         $formatted = $vendor->toArray();
+        $currentMonth = now();
+        $vendor->rented->loadSum([
+            'payments as current_month_collected_total' => fn ($query) => $query
+                ->where('status', 'collected')
+                ->whereBetween('payment_date', [
+                    $currentMonth->copy()->startOfMonth()->toDateString(),
+                    $currentMonth->copy()->endOfMonth()->toDateString(),
+                ]),
+        ], 'amount');
         $formatted['rented'] = $vendor->rented
             ->map(static function (Rented $rental) {
                 $formattedRental = $rental->toArray();
                 $formattedRental['next_due_date'] = $rental->next_due_date?->toDateString();
                 $formattedRental['last_payment_date'] = $rental->last_payment_date?->toDateString();
+                if ($rental->stall?->is_monthly) {
+                    $monthlyRent = (float) $rental->monthly_rent;
+                    if ($monthlyRent <= 0) {
+                        $monthlyRent = (float) $rental->stall->monthly_rate;
+                    }
+                    $formattedRental['monthly_balance'] = max(
+                        0,
+                        $monthlyRent - (float) ($rental->current_month_collected_total ?? 0)
+                    );
+                }
 
                 return $formattedRental;
             })
@@ -685,9 +804,73 @@ class MobileCollectorController extends Controller
         return $formatted;
     }
 
+    private function processMobileMonthlyPayment(
+        Rented $rental,
+        float $amount,
+        array $quote,
+        $paymentDate,
+        string $orNumber
+    ): array {
+        $monthlyRent = (float) ($rental->monthly_rent ?? 0);
+        if ($monthlyRent <= 0) {
+            $monthlyRent = (float) ($rental->stall?->monthly_rate ?? 0);
+        }
+
+        $monthTotal = (float) Payments::query()
+            ->where('rented_id', $rental->id)
+            ->where('status', 'collected')
+            ->whereYear('payment_date', $paymentDate->year)
+            ->whereMonth('payment_date', $paymentDate->month)
+            ->sum('amount');
+
+        $paymentType = $quote['payment_type'];
+        $advanceDays = (int) $quote['advance_days'];
+        $payment = Payments::create([
+            'rented_id' => $rental->id,
+            'vendor_id' => $rental->vendor_id,
+            'payment_type' => $paymentType,
+            'amount' => $amount,
+            'or_number' => $orNumber,
+            'payment_date' => $paymentDate->toDateString(),
+            'missed_days' => 0,
+            'advance_days' => $advanceDays,
+            'status' => 'collected',
+        ]);
+
+        $rental->last_payment_date = $paymentDate;
+        $rental->missed_days = 0;
+        $rental->remaining_balance = 0;
+        if ($paymentType === 'advance' && $advanceDays > 0) {
+            $rental->status = 'advance';
+            $rental->next_due_date = $paymentDate->copy()->addMonth()->addDays($advanceDays)->toDateString();
+        } elseif ($paymentType === 'monthly' || $monthTotal + $amount >= $monthlyRent) {
+            $rental->status = 'occupied';
+            $rental->next_due_date = $paymentDate->copy()->addMonth()->toDateString();
+        } else {
+            $rental->status = 'partial';
+        }
+        $rental->save();
+
+        return [
+            'success' => true,
+            'message' => 'Payment processed successfully.',
+            'payment' => $payment,
+            'amount' => $amount,
+            'advance_days' => $advanceDays,
+        ];
+    }
+
     public function paymentQuote(Rented $rental, float $amount): array
     {
         $paymentDate = now();
+        $nextDueDate = $rental->next_due_date?->toDateString();
+        abort_if(
+            $rental->status === 'advance'
+                && $nextDueDate
+                && $nextDueDate > $paymentDate->toDateString(),
+            422,
+            "This stall is already paid through {$nextDueDate}."
+        );
         $monthly = (bool) ($rental->stall?->is_monthly);
         $dailyRent = (float) ($rental->daily_rent ?? 0);
         $monthlyRent = (float) ($rental->monthly_rent ?? 0);
@@ -697,7 +880,32 @@ class MobileCollectorController extends Controller
 
         if ($monthly) {
             abort_if($monthlyRent <= 0, 422, 'Invalid monthly rent for this monthly stall.');
-            abort_if($amount < $monthlyRent, 422, 'The amount must cover at least one monthly rent payment.');
+            $monthTotal = (float) Payments::query()
+                ->where('rented_id', $rental->id)
+                ->where('status', 'collected')
+                ->whereYear('payment_date', $paymentDate->year)
+                ->whereMonth('payment_date', $paymentDate->month)
+                ->sum('amount');
+            $monthlyBalance = max(0, $monthlyRent - $monthTotal);
+
+            if ($amount < $monthlyBalance) {
+                return [
+                    'payment_type' => 'partial',
+                    'days_covered' => 0,
+                    'missed_days_covered' => 0,
+                    'advance_days' => 0,
+                ];
+            }
+            if ($amount > $monthlyBalance) {
+                $advanceDays = max(0, (int) floor(($amount - $monthlyBalance) / $monthlyRent) * 30);
+
+                return [
+                    'payment_type' => 'advance',
+                    'days_covered' => $advanceDays,
+                    'missed_days_covered' => 0,
+                    'advance_days' => $advanceDays,
+                ];
+            }
 
             return [
                 'payment_type' => 'monthly',
@@ -708,6 +916,14 @@ class MobileCollectorController extends Controller
         }
 
         abort_if($dailyRent <= 0, 422, 'Invalid daily rent for this rental.');
+        if (round($amount, 2) === round($dailyRent, 2)) {
+            return [
+                'payment_type' => 'daily',
+                'days_covered' => 1,
+                'missed_days_covered' => 0,
+                'advance_days' => 0,
+            ];
+        }
         $missed = max((int) $rental->missed_days, (int) ceil(
             (float) ($rental->remaining_balance ?? 0) / $dailyRent
         ));

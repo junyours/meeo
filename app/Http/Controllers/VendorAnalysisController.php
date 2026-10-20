@@ -104,14 +104,11 @@ class VendorAnalysisController extends Controller
             foreach ($currentlyActiveRentedStalls as $rental) {
                 $section = $rental->stall->section;
                 $stall = $rental->stall;
-                $dailyRent = $rental->daily_rent;
-                
-                // Check if stall is marked as monthly and has monthly rate
-                if ($stall->is_monthly && $stall->monthly_rate) {
-                    // Use monthly rate for daily display when is_monthly is true
-                    $dailyRent = $stall->monthly_rate;
+                $currentRates = $this->rateHistoryService->getRatesForDate($stall->id, now());
+                $dailyRent = $currentRates?->daily_rate ?? $rental->daily_rent ?? $stall->daily_rate;
+                if ($stall->is_monthly && ($currentRates?->monthly_rate ?? $stall->monthly_rate)) {
+                    $dailyRent = $currentRates?->monthly_rate ?? $stall->monthly_rate;
                 }
-                
                 $totalDaily += $dailyRent;
 
                 // Sum space rights numeric values with better error handling
@@ -138,51 +135,21 @@ class VendorAnalysisController extends Controller
             $totalAnnual = 0;
             $hasAnyAnnualRate = false;
             
-            // Get current month days for accurate calculation
-            $currentMonth = now()->month;
-            $currentYear = now()->year;
-            $isLeapYear = ($currentYear % 4 == 0 && ($currentYear % 100 != 0 || $currentYear % 400 == 0));
-            $daysInCurrentMonth = [31, $isLeapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][$currentMonth - 1];
+            $currentMonthStart = now()->copy()->startOfMonth();
+            $daysInCurrentMonth = now()->daysInMonth;
             
             foreach ($currentlyActiveRentedStalls as $rental) {
-                $section = $rental->stall->section;
                 $stall = $rental->stall;
-                
-                // Check if stall has its own daily, monthly, and annual rates in history
-                $historicalDailyRate = $this->rateHistoryService->getDailyRateForMonth($stall->id, $currentYear, $currentMonth);
-                $historicalMonthlyRate = $this->rateHistoryService->getMonthlyRateForMonth($stall->id, $currentYear, $currentMonth);
-                $historicalAnnualRate = $this->rateHistoryService->getAnnualRateForMonth($stall->id, $currentYear, $currentMonth);
-                
-                $hasStallDailyRate = !is_null($historicalDailyRate) && $historicalDailyRate > 0;
-                $hasStallMonthlyRate = !is_null($historicalMonthlyRate) && $historicalMonthlyRate > 0;
-                $hasStallAnnualRate = !is_null($historicalAnnualRate) && $historicalAnnualRate > 0;
-                
-                // Add annual rate if available
-                if ($hasStallAnnualRate) {
-                    $totalAnnual += $historicalAnnualRate;
+                $currentRates = $this->rateHistoryService->getRatesForDate($stall->id, now());
+                $annualRate = $currentRates?->annual_rate ?? $stall->annual_rate;
+                if ($annualRate > 0) {
+                    $totalAnnual += $annualRate;
                     $hasAnyAnnualRate = true;
                 }
-                
-                if ($hasStallDailyRate && $hasStallMonthlyRate) {
-                    // Check if stall is marked as monthly
-                    if ($stall->is_monthly) {
-                        // For monthly stalls, use monthly rate directly (not multiplied by 30)
-                        $totalMonthly += $historicalMonthlyRate;
-                    } elseif ($stall->stall_number == 16 && strtolower($section->name) === 'meat & fish') {
-                        // Use monthly rate directly for stall 16 in meat section (not multiplied by 30)
-                        $totalMonthly += $historicalMonthlyRate;
-                    } else {
-                        // For non-monthly stalls, always compute from daily rate using actual days in month
-                        $dailyRateToUse = $hasStallDailyRate ? $historicalDailyRate : $rental->daily_rent;
-                        $totalMonthly += $dailyRateToUse * $daysInCurrentMonth;
-                    }
-                } elseif ($section->rate_type === 'fixed') {
-                    // Use section fixed rate
-                    $totalMonthly += floatval($section->monthly_rate ?? 0);
-                } else {
-                    // Use historical daily rate calculation - if stall is not monthly OR section rate type is not fixed
-                    $dailyRateToUse = $hasStallDailyRate ? $historicalDailyRate : $rental->daily_rent;
-                    $totalMonthly += $dailyRateToUse * $daysInCurrentMonth;
+
+                for ($day = 1; $day <= $daysInCurrentMonth; $day++) {
+                    $date = $currentMonthStart->copy()->day($day);
+                    $totalMonthly += $this->getDailyRentForDate($rental, $date);
                 }
             }
             
@@ -269,51 +236,6 @@ class VendorAnalysisController extends Controller
                         continue;
                     }
                     
-                    // Get historical rates for this specific month
-                    $historicalDailyRate = $this->rateHistoryService->getDailyRateForMonth($stall->id, $targetYear, $targetMonth);
-                    $historicalMonthlyRate = $this->rateHistoryService->getMonthlyRateForMonth($stall->id, $targetYear, $targetMonth);
-                    $historicalAnnualRate = $this->rateHistoryService->getAnnualRateForMonth($stall->id, $targetYear, $targetMonth);
-                    
-                    $hasStallDailyRate = !is_null($historicalDailyRate) && $historicalDailyRate > 0;
-                    $hasStallMonthlyRate = !is_null($historicalMonthlyRate) && $historicalMonthlyRate > 0;
-                    $hasStallAnnualRate = !is_null($historicalAnnualRate) && $historicalAnnualRate > 0;
-                    
-                    // Determine the daily rate to use for this stall
-                    $dailyRateToUse = 0;
-                    
-                    // Check if stall has annual rate and matches the specific annual rate pattern
-                    if ($hasStallAnnualRate && $historicalAnnualRate == 40000) {
-                        // Apply special monthly distribution for 40000 annual rate
-                        $monthlyRateForAnnualStall = $this->getMonthlyRateForAnnualStall($targetMonth);
-                        $dailyRateToUse = $monthlyRateForAnnualStall / $daysInMonths[$index];
-                    } elseif ($hasStallDailyRate && $hasStallMonthlyRate) {
-                        // Check if stall is marked as monthly
-                        if ($stall->is_monthly) {
-                            // For monthly stalls, use monthly rate directly
-                            $dailyRateToUse = $historicalMonthlyRate / $daysInMonths[$index];
-                        } elseif ($stall->stall_number == 16 && strtolower($section->name) === 'meat & fish') {
-                            // Special logic for stall number 16 in meat section - use monthly rate directly
-                            $dailyRateToUse = $historicalMonthlyRate / $daysInMonths[$index];
-                        } else {
-                            // For non-monthly stalls, always use daily rate directly
-                            $dailyRateToUse = $hasStallDailyRate ? $historicalDailyRate : $rental->daily_rent;
-                            // Fallback to current stall's daily_rate if rental daily_rent is null or 0
-                            if (!$dailyRateToUse) {
-                                $dailyRateToUse = $stall->daily_rate;
-                            }
-                        }
-                    } elseif ($section->rate_type === 'fixed') {
-                        // Use section fixed rate converted to daily
-                        $dailyRateToUse = floatval($section->monthly_rate ?? 0) / $daysInMonths[$index];
-                    } else {
-                        // Use historical daily rate or rental daily rent - if stall is not monthly OR section rate type is not fixed
-                        $dailyRateToUse = $hasStallDailyRate ? $historicalDailyRate : $rental->daily_rent;
-                        // Fallback to current stall's daily_rate if rental daily_rent is null or 0
-                        if (!$dailyRateToUse) {
-                            $dailyRateToUse = $stall->daily_rate;
-                        }
-                    }
-                    
                     // Add this stall's daily rate to each day it was active
                     for ($day = 1; $day <= $daysInMonths[$index]; $day++) {
                         $currentDay = \Carbon\Carbon::createFromDate($targetYear, $targetMonth, $day)->startOfDay();
@@ -333,19 +255,9 @@ class VendorAnalysisController extends Controller
 
                         // Add the daily rate if the stall is active on this day
                         if ($isStallActiveOnDay) {
-                            $dailyRates[$day] += $dailyRateToUse;
+                            $dailyRates[$day] += $this->getDailyRentForDate($rental, $currentDay);
                         }
                     }
-
-                    Log::info('Daily rates for rental', [
-                        'vendor_id' => $vendorId,
-                        'month' => $month,
-                        'rental_id' => $rental->id,
-                        'stall_number' => $stall->stall_number,
-                        'daily_rate_to_use' => $dailyRateToUse,
-                        'active_days_count' => array_filter($dailyRates, fn($rate) => $rate > 0),
-                        'daily_rates' => $dailyRates
-                    ]);
                 }
                 
                 // Sum up all daily rates to get the monthly rate
@@ -563,37 +475,9 @@ class VendorAnalysisController extends Controller
                     $section = $rental->stall->section;
                     $stall = $rental->stall;
                     
-                    // Get historical rates for current month
-                    $currentMonth = now()->month;
-                    $currentYear = now()->year;
-                    
-                    // Check if stall has its own daily and monthly rates in history
-                    $historicalDailyRate = $this->rateHistoryService->getDailyRateForMonth($stall->id, $currentYear, $currentMonth);
-                    $historicalMonthlyRate = $this->rateHistoryService->getMonthlyRateForMonth($stall->id, $currentYear, $currentMonth);
-                    
-                    $hasStallDailyRate = !is_null($historicalDailyRate) && $historicalDailyRate > 0;
-                    $hasStallMonthlyRate = !is_null($historicalMonthlyRate) && $historicalMonthlyRate > 0;
-                    
-                    if ($hasStallDailyRate && $hasStallMonthlyRate) {
-                        // Check if stall is marked as monthly
-                        if ($stall->is_monthly) {
-                            // For monthly stalls, use monthly rate directly (not multiplied by 30)
-                            $sectionMonthlyTotal += $historicalMonthlyRate;
-                        } elseif ($stall->stall_number == 16 && strtolower($section->name) === 'meat & fish') {
-                            // Use monthly rate directly for stall 16 in meat section (not multiplied by 30)
-                            $sectionMonthlyTotal += $historicalMonthlyRate;
-                        } else {
-                            // For non-monthly stalls, always compute from daily rate using actual days in month
-                            $dailyRateToUse = $hasStallDailyRate ? $historicalDailyRate : $rental->daily_rent;
-                            $sectionMonthlyTotal += $dailyRateToUse * $daysInMonths[$currentMonth - 1];
-                        }
-                    } elseif ($section->rate_type === 'fixed') {
-                        // Use section fixed rate
-                        $sectionMonthlyTotal += floatval($section->monthly_rate ?? 0);
-                    } else {
-                        // Use historical daily rate calculation - if stall is not monthly OR section rate type is not fixed
-                        $dailyRateToUse = $hasStallDailyRate ? $historicalDailyRate : $rental->daily_rent;
-                        $sectionMonthlyTotal += $dailyRateToUse * $daysInMonths[$currentMonth - 1]; // Update monthly rent computation logic
+                    $monthStart = now()->copy()->startOfMonth();
+                    for ($day = 1; $day <= $monthStart->daysInMonth; $day++) {
+                        $sectionMonthlyTotal += $this->getDailyRentForDate($rental, $monthStart->copy()->day($day));
                     }
                 }
             }
@@ -669,35 +553,6 @@ class VendorAnalysisController extends Controller
                             continue;
                         }
                         
-                        // Get historical rates for this specific month
-                        $historicalDailyRate = $this->rateHistoryService->getDailyRateForMonth($stall->id, $targetYear, $targetMonth);
-                        $historicalMonthlyRate = $this->rateHistoryService->getMonthlyRateForMonth($stall->id, $targetYear, $targetMonth);
-                        
-                        $hasStallDailyRate = !is_null($historicalDailyRate) && $historicalDailyRate > 0;
-                        $hasStallMonthlyRate = !is_null($historicalMonthlyRate) && $historicalMonthlyRate > 0;
-                        
-                        // Determine the daily rate to use for this stall
-                        $dailyRateToUse = 0;
-                        if ($hasStallDailyRate && $hasStallMonthlyRate) {
-                            // Check if stall is marked as monthly
-                            if ($stall->is_monthly) {
-                                // For monthly stalls, use monthly rate directly
-                                $dailyRateToUse = $historicalMonthlyRate / $daysInMonths[$index];
-                            } elseif ($stall->stall_number == 16 && strtolower($section->name) === 'meat & fish') {
-                                // For stall 16, calculate daily equivalent from monthly rate
-                                $dailyRateToUse = $historicalMonthlyRate / $daysInMonths[$index];
-                            } else {
-                                // For non-monthly stalls, always use daily rate directly
-                                $dailyRateToUse = $hasStallDailyRate ? $historicalDailyRate : $rental->daily_rent;
-                            }
-                        } elseif ($section->rate_type === 'fixed') {
-                            // Use section fixed rate converted to daily
-                            $dailyRateToUse = floatval($section->monthly_rate ?? 0) / $daysInMonths[$index];
-                        } else {
-                            // Use historical daily rate or rental daily rent - if stall is not monthly OR section rate type is not fixed
-                            $dailyRateToUse = $hasStallDailyRate ? $historicalDailyRate : $rental->daily_rent;
-                        }
-                        
                         // Add this stall's daily rate to each day it was active
                         for ($day = 1; $day <= $daysInMonths[$index]; $day++) {
                             $currentDay = \Carbon\Carbon::createFromDate($targetYear, $targetMonth, $day)->startOfDay();
@@ -717,10 +572,11 @@ class VendorAnalysisController extends Controller
                             
                             // Add the daily rate if the stall is active on this day
                             if ($isStallActiveOnDay) {
-                                $dailyRates[$day] += $dailyRateToUse;
+                                $dailyRent = $this->getDailyRentForDate($rental, $currentDay);
+                                $dailyRates[$day] += $dailyRent;
                                 $stallKey = strtolower(trim((string) $stall->stall_number));
                                 if (isset($stallDailyRates[$stallKey])) {
-                                    $stallDailyRates[$stallKey][$day] += $dailyRateToUse;
+                                    $stallDailyRates[$stallKey][$day] += $dailyRent;
                                 }
                             }
                         }
@@ -788,6 +644,11 @@ class VendorAnalysisController extends Controller
     /**
      * Get display text for daily rate based on monthly stalls
      */
+    private function getDailyRentForDate($rental, $date)
+    {
+        return $this->rateHistoryService->getDailyRentForRentalDate($rental, $date);
+    }
+
     private function getDailyDisplayText($rentedStalls)
     {
         $hasMonthlyStalls = false;
@@ -1053,36 +914,4 @@ class VendorAnalysisController extends Controller
         return response()->json($vendorsWithBalances);
     }
 
-    /**
-     * Get monthly rate for annual stall based on specific distribution pattern
-     * For annual rate of 40000:
-     * - Jan, Feb: 4500 each
-     * - Mar: 1000
-     * - Apr, May: 4500 each
-     * - Jun: 1000
-     * - Jul, Aug: 4500 each
-     * - Sep: 1000
-     * - Oct, Nov: 4500 each
-     * - Dec: 1000
-     */
-    private function getMonthlyRateForAnnualStall($month)
-    {
-        // Define the monthly distribution pattern
-        $monthlyDistribution = [
-            1 => 4500,  // January
-            2 => 4500,  // February
-            3 => 1000,  // March
-            4 => 4500,  // April
-            5 => 4500,  // May
-            6 => 1000,  // June
-            7 => 4500,  // July
-            8 => 4500,  // August
-            9 => 1000,  // September
-            10 => 4500, // October
-            11 => 4500, // November
-            12 => 1000, // December
-        ];
-
-        return $monthlyDistribution[$month] ?? 0;
-    }
 }

@@ -5,9 +5,10 @@ namespace App\Http\Controllers;
 use App\Models\VendorDetails;
 use App\Models\Rented;
 use App\Models\Payments;
-use App\Models\StallRateHistory;
+use App\Services\GeminiLedgerRecognizer;
 use App\Services\StallRateHistoryService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Carbon\Carbon;
 
 class VendorPaymentController extends Controller
@@ -88,47 +89,7 @@ public function index()
         ->orderBy('first_name')
         ->get();
 
-    $stalls = $vendors->flatMap(function ($vendor) {
-        return $vendor->rented->pluck('stall')->filter();
-    })->keyBy('id');
-    $allStallIds = $stalls->keys();
-    $allHistoricalRates = [];
-    if ($allStallIds->isNotEmpty()) {
-        $rateHistoryByStall = StallRateHistory::query()
-            ->whereIn('stall_id', $allStallIds)
-            ->whereDate('effective_from', '<=', $yearEnd->toDateString())
-            ->select('stall_id', 'daily_rate', 'monthly_rate', 'annual_rate', 'effective_from')
-            ->orderBy('stall_id')
-            ->orderBy('effective_from')
-            ->get()
-            ->groupBy('stall_id');
-
-        foreach ($stalls as $stallId => $stall) {
-            $histories = $rateHistoryByStall->get($stallId, collect())->values();
-            $historyIndex = 0;
-            $currentHistory = null;
-
-            for ($month = 1; $month <= 12; $month++) {
-                $monthEnd = Carbon::create($currentYear, $month, 1)->endOfMonth()->toDateString();
-
-                while (
-                    $historyIndex < $histories->count()
-                    && $histories[$historyIndex]->effective_from->toDateString() <= $monthEnd
-                ) {
-                    $currentHistory = $histories[$historyIndex];
-                    $historyIndex++;
-                }
-
-                $allHistoricalRates[$stallId][$month] = [
-                    'daily' => $currentHistory?->daily_rate ?? $stall->daily_rate,
-                    'monthly' => $currentHistory?->monthly_rate ?? $stall->monthly_rate,
-                    'annual' => $currentHistory?->annual_rate ?? $stall->annual_rate,
-                ];
-            }
-        }
-    }
-
-    $data = $vendors->map(function ($vendor) use ($today, $currentYear, $allHistoricalRates) {
+    $data = $vendors->map(function ($vendor) use ($today, $currentYear) {
 
         $rentals = $vendor->rented->filter(function ($rental) {
             if (!$rental->stall) {
@@ -142,7 +103,7 @@ public function index()
             return $rental->stall->status !== 'vacant';
         });
 
-        $mappedRentals = $rentals->map(function ($rental) use ($today, $currentYear, $allHistoricalRates) {
+        $mappedRentals = $rentals->map(function ($rental) use ($today, $currentYear) {
 
             $dailyRent = (float) ($rental->daily_rent ?? 0);
             $monthlyRent = (float) ($rental->monthly_rent ?? 0);
@@ -178,7 +139,7 @@ public function index()
             // ✅ Calculate monthly balances for current year
             $monthlyBalances = $isUnoccupied
                 ? []
-                : $this->calculateMonthlyBalancesForRentalOptimized($rental, $currentYear, $allHistoricalRates[$rental->stall->id] ?? []);
+                : $this->calculateMonthlyBalancesForRentalOptimized($rental, $currentYear);
 
             return [
                 'rental_id' => $rental->id,
@@ -338,6 +299,109 @@ public function index()
             'message' => 'Bulk payment processing completed.',
             'results' => $results,
         ]);
+    }
+
+    public function importLedgerEntries(Request $request)
+    {
+        $request->validate([
+            'vendor_id' => 'required|exists:vendor_details,id',
+            'records' => 'required|array|min:1',
+            'records.*.payment_date' => 'required|date_format:Y-m-d',
+            'records.*.or_number' => 'required|string|max:50',
+            'records.*.amount' => 'required|numeric|min:0.01',
+        ]);
+
+        if (!auth()->check()) {
+            abort(403, 'You are not authorized to import ledger entries.');
+        }
+
+        $vendorId = (int) $request->input('vendor_id');
+        $vendor = VendorDetails::findOrFail($vendorId);
+        $records = $request->input('records');
+
+        $summary = [
+            'imported' => 0,
+            'skipped_duplicates' => 0,
+            'rejected' => [],
+        ];
+
+        DB::transaction(function () use ($vendor, $vendorId, $records, &$summary) {
+            foreach ($records as $index => $entry) {
+                $paymentDate = trim((string) ($entry['payment_date'] ?? ''));
+                $orNumber = trim((string) ($entry['or_number'] ?? ''));
+                $amount = (float) ($entry['amount'] ?? 0);
+
+                if ($paymentDate === '' || $orNumber === '' || $amount <= 0) {
+                    $summary['rejected'][] = [
+                        'row' => $index + 1,
+                        'message' => 'Missing payment date, OR number, or valid amount.',
+                    ];
+                    continue;
+                }
+
+                $duplicatePayment = Payments::where('vendor_id', $vendorId)
+                    ->where(function ($query) use ($orNumber, $paymentDate, $amount) {
+                        $query->whereRaw('LOWER(TRIM(or_number)) = ?', [strtolower(trim($orNumber))])
+                            ->orWhere(function ($nestedQuery) use ($paymentDate, $amount) {
+                                $nestedQuery->whereDate('payment_date', $paymentDate)
+                                    ->where('amount', number_format($amount, 2, '.', ''));
+                            });
+                    })
+                    ->first();
+
+                if ($duplicatePayment) {
+                    $summary['skipped_duplicates']++;
+                    continue;
+                }
+
+                $selectedRental = $vendor->rented()->where('status', '!=', 'vacant')->first();
+                if (!$selectedRental) {
+                    $selectedRental = $vendor->rented()->first();
+                }
+
+                $paymentData = [
+                    'rented_id' => $selectedRental ? $selectedRental->id : null,
+                    'vendor_id' => $vendorId,
+                    'payment_type' => 'historical',
+                    'amount' => number_format($amount, 2, '.', ''),
+                    'or_number' => $orNumber,
+                    'payment_date' => $paymentDate,
+                    'missed_days' => 0,
+                    'advance_days' => 0,
+                    'status' => 'collected',
+                ];
+
+                Payments::create($paymentData);
+                $summary['imported']++;
+            }
+        });
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Historical payment import completed.',
+            'summary' => $summary,
+        ]);
+    }
+
+    public function recognizeLedgerImage(Request $request, GeminiLedgerRecognizer $recognizer)
+    {
+        $validated = $request->validate([
+            'image' => 'required|image|mimes:jpg,jpeg,png,webp,bmp|max:10240',
+        ]);
+
+        if (!config('services.gemini.api_key')) {
+            return response()->json([
+                'message' => 'Gemini ledger recognition is not configured. Set GEMINI_API_KEY on the server.',
+            ], 503);
+        }
+
+        try {
+            $records = $recognizer->recognize($validated['image']);
+        } catch (\RuntimeException $exception) {
+            return response()->json(['message' => $exception->getMessage()], 502);
+        }
+
+        return response()->json(['records' => $records]);
     }
 
     /**
@@ -928,7 +992,7 @@ public function index()
     /**
      * Calculate monthly balances for a specific rental using pre-fetched historical rates (OPTIMIZED VERSION)
      */
-    private function calculateMonthlyBalancesForRentalOptimized($rental, $year, $historicalRates)
+    private function calculateMonthlyBalancesForRentalOptimized($rental, $year)
     {
         $months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
         $monthlyBalances = [];
@@ -955,7 +1019,7 @@ public function index()
             $targetMonth = $index + 1;
             
             // Calculate monthly rate using pre-fetched historical rates
-            $monthlyRate = $this->calculateMonthlyRateForRentalInMonthOptimized($rental, $year, $targetMonth, $daysInMonths[$index], $historicalRates[$targetMonth] ?? []);
+            $monthlyRate = $this->calculateMonthlyRateForRentalInMonthOptimized($rental, $year, $targetMonth, $daysInMonths[$index]);
             
             $monthPayments = $paymentsByMonth->get($index, collect());
             
@@ -992,76 +1056,33 @@ public function index()
     }
 
     /**
-     * Calculate monthly rate for a rental in a specific month using pre-fetched historical rates (OPTIMIZED VERSION)
+     * Calculate monthly rent from the rates effective on each active day.
      */
-    private function calculateMonthlyRateForRentalInMonthOptimized($rental, $targetYear, $targetMonth, $daysInMonth, $historicalRates)
+    private function calculateMonthlyRateForRentalInMonthOptimized($rental, $targetYear, $targetMonth, $daysInMonth)
     {
-        $section = $rental->stall->section;
-        $stall = $rental->stall;
-        
-        // Create an array to hold daily rates for each day of the month
-        // Check if this rental was active during the target month
         $rentalStart = $rental->created_at->copy()->startOfDay();
         $monthStart = \Carbon\Carbon::createFromDate($targetYear, $targetMonth, 1)->startOfDay();
         $monthEnd = \Carbon\Carbon::createFromDate($targetYear, $targetMonth, $daysInMonth)->endOfDay();
-        
-        // Check if rental became unoccupied during this month or before
         $rentalEnd = null;
         if ($rental->status === 'unoccupied' && $rental->updated_at) {
             $rentalEnd = $rental->updated_at->copy()->endOfDay();
         }
-        
-        // Skip if rental wasn't active during this month at all
+
         if ($rentalStart->greaterThan($monthEnd) || 
             ($rentalEnd && $rentalEnd->lessThan($monthStart))) {
             return 0;
         }
-        
-        // Use pre-fetched historical rates instead of database queries (OPTIMIZATION!)
-        $historicalDailyRate = $historicalRates['daily'] ?? null;
-        $historicalMonthlyRate = $historicalRates['monthly'] ?? null;
-        $historicalAnnualRate = $historicalRates['annual'] ?? null;
-        
-        $hasStallDailyRate = !is_null($historicalDailyRate) && $historicalDailyRate > 0;
-        $hasStallMonthlyRate = !is_null($historicalMonthlyRate) && $historicalMonthlyRate > 0;
-        $hasStallAnnualRate = !is_null($historicalAnnualRate) && $historicalAnnualRate > 0;
-        
-        // Check if stall is monthly
-        $isMonthlyStall = $rental->stall && $rental->stall->is_monthly;
-        
-        // Determine the daily rate to use for this stall (same logic as VendorAnalysisController)
-        $dailyRateToUse = 0;
-        
-        // Check if stall has annual rate and matches the specific annual rate pattern
-        if ($hasStallAnnualRate && $historicalAnnualRate == 40000) {
-            // Apply special monthly distribution for 40000 annual rate
-            $monthlyRateForAnnualStall = $this->getMonthlyRateForAnnualStall($targetMonth);
-            $dailyRateToUse = $monthlyRateForAnnualStall / $daysInMonth;
-        } elseif ($hasStallDailyRate && $hasStallMonthlyRate) {
-            // Check if stall is marked as monthly
-            if ($isMonthlyStall) {
-                // For monthly stalls, use monthly rate directly
-                $dailyRateToUse = $historicalMonthlyRate / $daysInMonth;
-            } elseif ($stall->stall_number == 16 && strtolower($section->name) === 'meat & fish') {
-                // Special logic for stall number 16 in meat section - use monthly rate directly
-                $dailyRateToUse = $historicalMonthlyRate / $daysInMonth;
-            } else {
-                // For non-monthly stalls, always use daily rate directly
-                $dailyRateToUse = $hasStallDailyRate ? $historicalDailyRate : $rental->daily_rent;
+        $monthlyRate = 0;
+        for ($day = 1; $day <= $daysInMonth; $day++) {
+            $currentDay = \Carbon\Carbon::createFromDate($targetYear, $targetMonth, $day)->startOfDay();
+            if ($currentDay->lessThan($rentalStart) || ($rentalEnd && $currentDay->greaterThan($rentalEnd))) {
+                continue;
             }
-        } elseif ($section->rate_type === 'fixed') {
-            // Use section fixed rate converted to daily
-            $dailyRateToUse = floatval($section->monthly_rate ?? 0) / $daysInMonth;
-        } else {
-            // Use historical daily rate or rental daily rent - if stall is not monthly OR section rate type is not fixed
-            $dailyRateToUse = $hasStallDailyRate ? $historicalDailyRate : $rental->daily_rent;
-        }
-        
-        $activeStart = $rentalStart->greaterThan($monthStart) ? $rentalStart : $monthStart;
-        $activeEnd = $rentalEnd && $rentalEnd->lessThan($monthEnd) ? $rentalEnd : $monthEnd;
-        $activeDays = $activeStart->diffInDays($activeEnd) + 1;
 
-        return $dailyRateToUse * min($daysInMonth, $activeDays);
+            $monthlyRate += $this->rateHistoryService->getDailyRentForRentalDate($rental, $currentDay);
+        }
+
+        return $monthlyRate;
     }
     private function calculateMonthlyBalancesForRental($rental, $year)
     {
@@ -1187,97 +1208,30 @@ public function index()
      */
     private function calculateMonthlyRateForRentalInMonth($rental, $targetYear, $targetMonth, $daysInMonth)
     {
-        $section = $rental->stall->section;
-        $stall = $rental->stall;
-        
-        // Create an array to hold daily rates for each day of the month
-        $dailyRates = [];
-        for ($day = 1; $day <= $daysInMonth; $day++) {
-            $dailyRates[$day] = 0;
-        }
-        
-        // Check if this rental was active during the target month
         $rentalStart = $rental->created_at->copy()->startOfDay();
         $monthStart = \Carbon\Carbon::createFromDate($targetYear, $targetMonth, 1)->startOfDay();
         $monthEnd = \Carbon\Carbon::createFromDate($targetYear, $targetMonth, $daysInMonth)->endOfDay();
-        
-        // Check if rental became unoccupied during this month or before
         $rentalEnd = null;
         if ($rental->status === 'unoccupied' && $rental->updated_at) {
             $rentalEnd = $rental->updated_at->copy()->endOfDay();
         }
-        
-        // Skip if rental wasn't active during this month at all
+
         if ($rentalStart->greaterThan($monthEnd) || 
             ($rentalEnd && $rentalEnd->lessThan($monthStart))) {
             return 0;
         }
-        
-        // Get historical rates for this specific month (same as VendorAnalysisController)
-        $historicalDailyRate = $this->rateHistoryService->getDailyRateForMonth($stall->id, $targetYear, $targetMonth);
-        $historicalMonthlyRate = $this->rateHistoryService->getMonthlyRateForMonth($stall->id, $targetYear, $targetMonth);
-        $historicalAnnualRate = $this->rateHistoryService->getAnnualRateForMonth($stall->id, $targetYear, $targetMonth);
-        
-        $hasStallDailyRate = !is_null($historicalDailyRate) && $historicalDailyRate > 0;
-        $hasStallMonthlyRate = !is_null($historicalMonthlyRate) && $historicalMonthlyRate > 0;
-        $hasStallAnnualRate = !is_null($historicalAnnualRate) && $historicalAnnualRate > 0;
-        
-        // Check if stall is monthly
-        $isMonthlyStall = $rental->stall && $rental->stall->is_monthly;
-        
-        // Determine the daily rate to use for this stall (same logic as VendorAnalysisController)
-        $dailyRateToUse = 0;
-        
-        // Check if stall has annual rate and matches the specific annual rate pattern
-        if ($hasStallAnnualRate && $historicalAnnualRate == 40000) {
-            // Apply special monthly distribution for 40000 annual rate
-            $monthlyRateForAnnualStall = $this->getMonthlyRateForAnnualStall($targetMonth);
-            $dailyRateToUse = $monthlyRateForAnnualStall / $daysInMonth;
-        } elseif ($hasStallDailyRate && $hasStallMonthlyRate) {
-            // Check if stall is marked as monthly
-            if ($isMonthlyStall) {
-                // For monthly stalls, use monthly rate directly
-                $dailyRateToUse = $historicalMonthlyRate / $daysInMonth;
-            } elseif ($stall->stall_number == 16 && strtolower($section->name) === 'meat & fish') {
-                // Special logic for stall number 16 in meat section - use monthly rate directly
-                $dailyRateToUse = $historicalMonthlyRate / $daysInMonth;
-            } else {
-                // For non-monthly stalls, always use daily rate directly
-                $dailyRateToUse = $hasStallDailyRate ? $historicalDailyRate : $rental->daily_rent;
-            }
-        } elseif ($section->rate_type === 'fixed') {
-            // Use section fixed rate converted to daily
-            $dailyRateToUse = floatval($section->monthly_rate ?? 0) / $daysInMonth;
-        } else {
-            // Use historical daily rate or rental daily rent - if stall is not monthly OR section rate type is not fixed
-            $dailyRateToUse = $hasStallDailyRate ? $historicalDailyRate : $rental->daily_rent;
-        }
-        
-        // Add this stall's daily rate to each day it was active
+
+        $monthlyRate = 0;
         for ($day = 1; $day <= $daysInMonth; $day++) {
             $currentDay = \Carbon\Carbon::createFromDate($targetYear, $targetMonth, $day)->startOfDay();
-            
-            // Check if this stall is active on this specific day
-            $isStallActiveOnDay = true;
-            
-            // If rental starts after this day, it's not active
-            if ($rentalStart->greaterThan($currentDay)) {
-                $isStallActiveOnDay = false;
+            if ($currentDay->lessThan($rentalStart) || ($rentalEnd && $currentDay->greaterThan($rentalEnd))) {
+                continue;
             }
-            
-            // If rental ended before this day, it's not active
-            if ($rentalEnd && $rentalEnd->lessThan($currentDay)) {
-                $isStallActiveOnDay = false;
-            }
-            
-            // Add the daily rate if the stall is active on this day
-            if ($isStallActiveOnDay) {
-                $dailyRates[$day] += $dailyRateToUse;
-            }
+
+            $monthlyRate += $this->rateHistoryService->getDailyRentForRentalDate($rental, $currentDay);
         }
-        
-        // Sum up all daily rates to get the monthly rate
-        return array_sum($dailyRates);
+
+        return $monthlyRate;
     }
 
     /**
@@ -1288,30 +1242,6 @@ public function index()
         $isLeapYear = ($year % 4 == 0 && ($year % 100 != 0 || $year % 400 == 0));
         $daysInMonths = [31, $isLeapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
         return $daysInMonths[$monthIndex];
-    }
-
-    /**
-     * Get monthly rate for annual stall (same as VendorAnalysisController)
-     */
-    private function getMonthlyRateForAnnualStall($month)
-    {
-        // Same logic as VendorAnalysisController for annual rate distribution
-        $annualRates = [
-            1 => 2500, // January
-            2 => 2500, // February
-            3 => 2500, // March
-            4 => 2500, // April
-            5 => 2500, // May
-            6 => 2500, // June
-            7 => 2500, // July
-            8 => 2500, // August
-            9 => 2500, // September
-            10 => 2500, // October
-            11 => 2500, // November
-            12 => 2500, // December
-        ];
-        
-        return $annualRates[$month] ?? 2500;
     }
 
     /**
@@ -1946,6 +1876,6 @@ public function index()
                 $rental->save();
             }
         }
-        
+
     }
 }

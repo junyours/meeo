@@ -218,6 +218,8 @@ Route::middleware('auth:sanctum')->prefix('vendor-payments')->group(function () 
     Route::get('/', [VendorPaymentController::class, 'index']);
     Route::get('/history/{vendorId}', [VendorPaymentController::class, 'getPaymentHistory']);
     Route::post('/bulk/{vendorId}', [VendorPaymentController::class, 'bulkPayment']);
+    Route::post('/ledger/recognize', [VendorPaymentController::class, 'recognizeLedgerImage']);
+    Route::post('/ledger/import', [VendorPaymentController::class, 'importLedgerEntries']);
     Route::post('/selected-months/{vendorId}', [VendorPaymentController::class, 'processSelectedMonthsPayment']);
     Route::post('/consume-deposit/{vendorId}', [VendorPaymentController::class, 'consumeDeposit']);
     Route::get('/market-collection-report', [VendorPaymentController::class, 'getMarketCollectionReport']);
