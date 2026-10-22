@@ -10,6 +10,8 @@ use RuntimeException;
 
 class GeminiLedgerRecognizer
 {
+    private const MAX_ATTEMPTS = 3;
+
     public function recognize(UploadedFile $image): array
     {
         $apiKey = config('services.gemini.api_key');
@@ -18,35 +20,56 @@ class GeminiLedgerRecognizer
         }
 
         $model = config('services.gemini.model', 'gemini-3.8-flash');
-        try {
-            $response = Http::acceptJson()
-                ->withHeaders(['x-goog-api-key' => $apiKey])
-                ->timeout(180)
-                ->post('https://generativelanguage.googleapis.com/v1beta/interactions', [
-                    'model' => $model,
-                    'input' => [
-                        ['type' => 'text', 'text' => $this->prompt()],
-                        [
-                            'type' => 'image',
-                            'data' => base64_encode($image->get()),
-                            'mime_type' => $image->getMimeType(),
-                        ],
-                    ],
-                    'response_format' => [
-                        'type' => 'text',
-                        'mime_type' => 'application/json',
-                        'schema' => $this->responseSchema(),
-                    ],
-                    'generation_config' => [
-                        'thinking_level' => 'low',
-                    ],
-                    'store' => false,
+        $requestPayload = [
+            'model' => $model,
+            'input' => [
+                ['type' => 'text', 'text' => $this->prompt()],
+                [
+                    'type' => 'image',
+                    'data' => base64_encode($image->get()),
+                    'mime_type' => $image->getMimeType(),
+                ],
+            ],
+            'response_format' => [
+                'type' => 'text',
+                'mime_type' => 'application/json',
+                'schema' => $this->responseSchema(),
+            ],
+            'generation_config' => [
+                'thinking_level' => 'low',
+            ],
+            'store' => false,
+        ];
+
+        $response = null;
+        for ($attempt = 1; $attempt <= self::MAX_ATTEMPTS; $attempt++) {
+            try {
+                $response = Http::acceptJson()
+                    ->withHeaders(['x-goog-api-key' => $apiKey])
+                    ->timeout(180)
+                    ->post('https://generativelanguage.googleapis.com/v1beta/interactions', $requestPayload);
+            } catch (ConnectionException $exception) {
+                if ($attempt < self::MAX_ATTEMPTS) {
+                    usleep($this->retryDelayMilliseconds() * 1000);
+                    continue;
+                }
+
+                Log::warning('Gemini ledger recognition could not connect.', [
+                    'message' => $exception->getMessage(),
+                    'attempts' => $attempt,
                 ]);
-        } catch (ConnectionException $exception) {
-            Log::warning('Gemini ledger recognition could not connect.', [
-                'message' => $exception->getMessage(),
-            ]);
-            throw new RuntimeException('Could not connect to Gemini to read the ledger.', 0, $exception);
+                throw new RuntimeException('Could not connect to Gemini to read the ledger.', 0, $exception);
+            }
+
+            if (!$this->isTemporaryFailure($response) || $attempt === self::MAX_ATTEMPTS) {
+                break;
+            }
+
+            usleep($this->retryDelayMilliseconds($response) * 1000);
+        }
+
+        if (!$response) {
+            throw new RuntimeException('Gemini could not read the ledger image. Please try again.');
         }
 
         if (!$response->successful()) {
@@ -54,8 +77,16 @@ class GeminiLedgerRecognizer
             Log::warning('Gemini ledger recognition request failed.', [
                 'status' => $response->status(),
                 'model' => $model,
+                'attempts' => $attempt,
                 'provider_message' => is_string($providerMessage) ? $providerMessage : null,
             ]);
+
+            if ($this->isTemporaryFailure($response)) {
+                throw new RuntimeException(
+                    'Gemini is temporarily busy. Your ledger image is safe; please try again in a moment.',
+                    503
+                );
+            }
 
             if (is_string($providerMessage) && $providerMessage !== '') {
                 throw new RuntimeException("Gemini request failed: {$providerMessage}");
@@ -93,6 +124,26 @@ class GeminiLedgerRecognizer
         }
 
         return $this->normalizeRecords($payload['records']);
+    }
+
+    private function isTemporaryFailure(\Illuminate\Http\Client\Response $response): bool
+    {
+        if (in_array($response->status(), [429, 500, 502, 503, 504], true)) {
+            return true;
+        }
+
+        $message = data_get($response->json(), 'error.message');
+        return is_string($message) && stripos($message, 'high demand') !== false;
+    }
+
+    private function retryDelayMilliseconds(?\Illuminate\Http\Client\Response $response = null): int
+    {
+        $retryAfter = $response?->header('Retry-After');
+        if (is_string($retryAfter) && is_numeric($retryAfter)) {
+            return (int) (min(2, max(0, (float) $retryAfter)) * 1000);
+        }
+
+        return $response ? 900 : 400;
     }
 
     private function prompt(): string

@@ -57,8 +57,11 @@ Route::prefix('mobile')->group(function () {
         Route::post('/collections/quote', [MobileCollectorController::class, 'quote']);
         Route::post('/collections', [MobileCollectorController::class, 'createCollection']);
         Route::get('/collections', [MobileCollectorController::class, 'collections']);
+        Route::put('/collections/{collection}', [MobileCollectorController::class, 'updateCollection']);
+        Route::delete('/collections/{collection}', [MobileCollectorController::class, 'cancelCollection']);
         Route::post('/collections/{collection}/collect', [MobileCollectorController::class, 'markCollected']);
         Route::post('/turnover', [MobileCollectorController::class, 'turnover']);
+        Route::get('/turnover/eligible', [MobileCollectorController::class, 'eligibleTurnover']);
     });
 });
 

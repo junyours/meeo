@@ -17,6 +17,8 @@ class Collection extends Model
         'stall_id',
         'collector_id',
         'amount_to_pay',
+        'cash_received',
+        'change_due',
         'days_covered',
         'payment_type',
         'is_collected',
@@ -28,6 +30,8 @@ class Collection extends Model
 
     protected $casts = [
         'amount_to_pay' => 'decimal:2',
+        'cash_received' => 'decimal:2',
+        'change_due' => 'decimal:2',
         'days_covered' => 'integer',
         'is_collected' => 'boolean',
         'collected_at' => 'datetime',

@@ -370,13 +370,16 @@ class MobileCollectorController extends Controller
         abort_unless($collection->collector_id === $request->user()->id, 404);
         $validated = $request->validate([
             'or_number' => ['required', 'string', 'regex:/^\d{7}$/'],
+            'cash_received' => ['sometimes', 'numeric', 'min:0', 'max:9999999999.99'],
         ]);
 
-        $result = DB::transaction(function () use ($collection, $validated) {
+        $result = DB::transaction(function () use ($request, $collection, $validated) {
             $session = CollectionSession::query()
                 ->lockForUpdate()
                 ->findOrFail($collection->collection_session_id);
             $query = Collection::query()
+                ->where('collector_id', $request->user()->id)
+                ->where('collection_session_id', $session->id)
                 ->where('client_transaction_id', $collection->client_transaction_id);
             if (! $collection->client_transaction_id) {
                 $query->whereKey($collection->id);
@@ -392,6 +395,17 @@ class MobileCollectorController extends Controller
                     409,
                     'This collection has already been recorded with a different OR number.'
                 );
+                if (array_key_exists('cash_received', $validated)) {
+                    $storedCashReceived = $rows
+                        ->first(fn (Collection $row) => $row->cash_received !== null)
+                        ?->cash_received;
+                    abort_unless(
+                        $storedCashReceived !== null
+                            && (int) round((float) $storedCashReceived * 100) === (int) round((float) $validated['cash_received'] * 100),
+                        409,
+                        'This collection has already been recorded with a different cash amount.'
+                    );
+                }
 
                 return $this->formatCollectionGroup($rows);
             }
@@ -401,6 +415,16 @@ class MobileCollectorController extends Controller
                 409,
                 'This collection session has already been verified and is closed.'
             );
+            $cashReceivedCents = array_key_exists('cash_received', $validated)
+                ? (int) round((float) $validated['cash_received'] * 100)
+                : null;
+            $expectedAmountCents = (int) round((float) $rows->sum('amount_to_pay') * 100);
+            abort_if(
+                $cashReceivedCents !== null && $cashReceivedCents < $expectedAmountCents,
+                422,
+                'Cash received cannot be less than the expected collection.'
+            );
+
             foreach ($rows as $row) {
                 if ($row->is_collected) {
                     continue;
@@ -431,7 +455,16 @@ class MobileCollectorController extends Controller
                 $row->save();
             }
 
+            if ($cashReceivedCents !== null) {
+                $primaryRow = $rows->first();
+                $primaryRow->cash_received = number_format($cashReceivedCents / 100, 2, '.', '');
+                $primaryRow->change_due = number_format(($cashReceivedCents - $expectedAmountCents) / 100, 2, '.', '');
+                $primaryRow->save();
+            }
+
             $rowsQuery = Collection::query()
+                ->where('collector_id', $request->user()->id)
+                ->where('collection_session_id', $session->id)
                 ->with(['vendor', 'stall.section'])
                 ->orderBy('id');
             if ($collection->client_transaction_id) {
@@ -457,6 +490,96 @@ class MobileCollectorController extends Controller
         });
 
         return response()->json(['collection' => $result]);
+    }
+
+    public function updateCollection(Request $request, Collection $collection)
+    {
+        abort_unless($collection->collector_id === $request->user()->id, 404);
+        $validated = $request->validate([
+            'amount_to_pay' => ['required', 'numeric', 'min:0.01'],
+        ]);
+
+        $result = DB::transaction(function () use ($request, $collection, $validated) {
+            $session = CollectionSession::query()
+                ->lockForUpdate()
+                ->findOrFail($collection->collection_session_id);
+            abort_unless($session->status === 'pending', 409, 'Only collections in an open session can be edited.');
+
+            $query = Collection::query()
+                ->where('collector_id', $request->user()->id)
+                ->where('collection_session_id', $session->id)
+                ->where('client_transaction_id', $collection->client_transaction_id);
+            if (! $collection->client_transaction_id) {
+                $query->whereKey($collection->id);
+            }
+            $rows = $query->orderBy('id')->lockForUpdate()->get();
+            abort_if($rows->isEmpty(), 404);
+            abort_unless(
+                $rows->every(fn (Collection $row) => ! $row->is_collected
+                    && $row->payment_id === null
+                    && $row->collection_turnover_id === null),
+                409,
+                'Only uncollected entries that are not part of a turnover can be edited.'
+            );
+
+            $rentals = $this->loadCollectionRentals($rows->pluck('rented_id')->all(), true);
+            $totalCents = (int) round((float) $validated['amount_to_pay'] * 100);
+            abort_if($totalCents < count($rows), 422, 'The amount must provide at least one cent for every stall.');
+            $baseCents = intdiv($totalCents, count($rows));
+            $remainderCents = $totalCents % count($rows);
+            foreach ($rows->values() as $index => $row) {
+                $rental = collect($rentals)->firstWhere('id', $row->rented_id);
+                abort_unless($rental && $rental->vendor_id === $row->vendor_id, 409, 'A collection stall no longer belongs to this vendor.');
+                $this->assertRentalSnapshotMatches($rental, $row->rental_snapshot);
+                $amount = ($baseCents + ($index < $remainderCents ? 1 : 0)) / 100;
+                $quote = $this->paymentQuote($rental, $amount);
+                $row->amount_to_pay = $amount;
+                $row->payment_type = $quote['payment_type'];
+                $row->days_covered = $quote['days_covered'];
+                $row->save();
+            }
+
+            $rows->load(['vendor', 'stall.section']);
+            $this->refreshSessionTotals($session);
+
+            return $this->formatCollectionGroup($rows);
+        });
+
+        return response()->json(['collection' => $result]);
+    }
+
+    public function cancelCollection(Request $request, Collection $collection)
+    {
+        abort_unless($collection->collector_id === $request->user()->id, 404);
+
+        DB::transaction(function () use ($request, $collection) {
+            $session = CollectionSession::query()
+                ->lockForUpdate()
+                ->findOrFail($collection->collection_session_id);
+            abort_unless($session->status === 'pending', 409, 'Only collections in an open session can be canceled.');
+
+            $query = Collection::query()
+                ->where('collector_id', $request->user()->id)
+                ->where('collection_session_id', $session->id)
+                ->where('client_transaction_id', $collection->client_transaction_id);
+            if (! $collection->client_transaction_id) {
+                $query->whereKey($collection->id);
+            }
+            $rows = $query->lockForUpdate()->get();
+            abort_if($rows->isEmpty(), 404);
+            abort_unless(
+                $rows->every(fn (Collection $row) => ! $row->is_collected
+                    && $row->payment_id === null
+                    && $row->collection_turnover_id === null),
+                409,
+                'Only uncollected entries that are not part of a turnover can be canceled.'
+            );
+
+            $rows->each->delete();
+            $this->refreshSessionTotals($session);
+        });
+
+        return response()->json(['message' => 'Collection canceled.']);
     }
 
     public function collections(Request $request)
@@ -509,19 +632,26 @@ class MobileCollectorController extends Controller
             'cash_turned_over' => ['required', 'numeric', 'min:0'],
             'remarks' => ['nullable', 'string', 'max:2000'],
             'collection_date' => ['nullable', 'date', 'before_or_equal:today'],
+            'collection_dates' => ['sometimes', 'array', 'min:1', 'max:31'],
+            'collection_dates.*' => ['required', 'date', 'before_or_equal:today', 'distinct'],
         ]);
-        $session = DB::transaction(function () use ($request, $validated) {
-            $session = CollectionSession::query()
-                ->where('collector_id', $request->user()->id)
-                ->whereDate('collection_date', $validated['collection_date'] ?? today())
-                ->lockForUpdate()
-                ->firstOrFail();
+        $turnoverDate = $validated['collection_date'] ?? today()->toDateString();
+        $collectionDates = $validated['collection_dates'] ?? [$turnoverDate];
+        $turnoverResult = DB::transaction(function () use ($request, $validated, $turnoverDate, $collectionDates) {
+            $turnoverSession = CollectionSession::query()->firstOrCreate(
+                [
+                    'collector_id' => $request->user()->id,
+                    'collection_date' => $turnoverDate,
+                ],
+                ['status' => 'pending']
+            );
+            $turnoverSession = CollectionSession::query()->lockForUpdate()->findOrFail($turnoverSession->id);
 
             $existingTurnover = CollectionTurnover::query()
                 ->where('turnover_client_id', $validated['turnover_client_id'])
                 ->first();
             if ($existingTurnover) {
-                abort_unless($existingTurnover->collection_session_id === $session->id, 409);
+                abort_unless($existingTurnover->collection_session_id === $turnoverSession->id, 409);
                 abort_if(
                     round((float) $existingTurnover->cash_turned_over, 2)
                         !== round((float) $validated['cash_turned_over'], 2)
@@ -530,10 +660,27 @@ class MobileCollectorController extends Controller
                     'This turnover identifier has already been used for different details.'
                 );
 
-                return $session->fresh();
+                return [
+                    'session' => $turnoverSession->fresh(),
+                    'dates' => $existingTurnover->collections()
+                        ->with('session:id,collection_date')
+                        ->get()
+                        ->pluck('session.collection_date')
+                        ->unique()
+                        ->values()
+                        ->all(),
+                ];
             }
 
-            $eligibleCollections = $session->collections()
+            $sessions = CollectionSession::query()
+                ->where('collector_id', $request->user()->id)
+                ->whereIn('collection_date', array_unique([...$collectionDates, $turnoverDate]))
+                ->lockForUpdate()
+                ->get();
+            $sessionIds = $sessions->pluck('id')->all();
+
+            $eligibleCollections = Collection::query()
+                ->whereIn('collection_session_id', $sessionIds)
                 ->where('is_collected', true)
                 ->whereNull('collection_turnover_id')
                 ->lockForUpdate()
@@ -547,7 +694,7 @@ class MobileCollectorController extends Controller
             $collectedTotal = (float) $eligibleCollections->sum('amount_to_pay');
             $cash = (float) $validated['cash_turned_over'];
             $turnover = CollectionTurnover::create([
-                'collection_session_id' => $session->id,
+                'collection_session_id' => $turnoverSession->id,
                 'turnover_client_id' => $validated['turnover_client_id'],
                 'expected_total' => $collectedTotal,
                 'collected_total' => $collectedTotal,
@@ -556,20 +703,87 @@ class MobileCollectorController extends Controller
                 'remarks' => $validated['remarks'] ?? null,
                 'submitted_at' => now(),
             ]);
-            $session->collections()
+            Collection::query()
                 ->whereKey($eligibleCollections->modelKeys())
                 ->update(['collection_turnover_id' => $turnover->id]);
-            $session->update([
+
+            $turnoverSession->update([
                 'turnover_client_id' => $validated['turnover_client_id'],
                 'status' => 'submitted',
                 'remarks' => $validated['remarks'] ?? null,
             ]);
-            $this->refreshSessionTotals($session);
+            foreach ($sessions as $session) {
+                $session->update(['status' => 'submitted']);
+                $this->refreshSessionTotals($session);
+            }
 
-            return $session->fresh();
+            return [
+                'session' => $turnoverSession->fresh(),
+                'dates' => $eligibleCollections
+                    ->load('session:id,collection_date')
+                    ->pluck('session.collection_date')
+                    ->unique()
+                    ->values()
+                    ->all(),
+            ];
         });
 
-        return response()->json(['session' => $session]);
+        return response()->json([
+            'session' => $turnoverResult['session'],
+            'turnover' => [
+                'collection_dates' => $turnoverResult['dates'],
+                'cash_turned_over' => number_format((float) $validated['cash_turned_over'], 2, '.', ''),
+            ],
+        ]);
+    }
+
+    public function eligibleTurnover(Request $request)
+    {
+        $sessions = CollectionSession::query()
+            ->where('collector_id', $request->user()->id)
+            ->whereDate('collection_date', '<=', today())
+            ->whereHas('collections', fn ($query) => $query
+                ->where('is_collected', true)
+                ->whereNull('collection_turnover_id'))
+            ->with(['collections' => fn ($query) => $query
+                ->where('is_collected', true)
+                ->whereNull('collection_turnover_id')
+                ->with(['vendor', 'stall.section', 'payment'])])
+            ->orderBy('collection_date')
+            ->get();
+
+        $eligible = $sessions->flatMap(fn ($session) => $session->collections->map(
+            fn (Collection $collection) => $collection->setAttribute(
+                'collection_date',
+                $session->collection_date->toDateString()
+            )
+        ));
+        $dates = $eligible->groupBy('collection_date')
+            ->map(fn ($rows, $date) => [
+                'date' => $date,
+                'expected_total' => number_format((float) $rows->sum('amount_to_pay'), 2, '.', ''),
+                'collection_count' => $rows->groupBy(
+                    fn ($item) => $item->client_transaction_id ?: "collection-{$item->id}"
+                )->count(),
+            ])
+            ->values();
+        $groups = $eligible
+            ->groupBy(fn ($item) => $item->collection_date . ':' . ($item->client_transaction_id ?: "collection-{$item->id}"))
+            ->map(function ($rows) {
+                $collectionDate = $rows->first()->collection_date;
+                $group = $this->formatCollectionGroup(new EloquentCollection($rows->all()));
+                $group->setAttribute('collection_date', $collectionDate);
+
+                return $group->toArray();
+            })
+            ->values();
+
+        return response()->json([
+            'collection_dates' => $dates,
+            'collections' => $groups,
+            'expected_total' => number_format((float) $eligible->sum('amount_to_pay'), 2, '.', ''),
+            'collection_count' => $groups->count(),
+        ]);
     }
 
     private function collectionRequestMatches(
@@ -625,6 +839,9 @@ class MobileCollectorController extends Controller
             $paymentTypes->count() === 1 ? $paymentTypes->first() : 'combined'
         );
         $primary->setAttribute('is_collected', $rows->every(fn ($row) => $row->is_collected));
+        $cashRecord = $rows->first(fn (Collection $row) => $row->cash_received !== null);
+        $primary->setAttribute('cash_received', $cashRecord?->cash_received);
+        $primary->setAttribute('change_due', $cashRecord?->change_due);
         $primary->setAttribute(
             'or_number',
             $rows->map(fn ($row) => $row->payment?->or_number)

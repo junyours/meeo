@@ -305,6 +305,8 @@ public function index()
     {
         $request->validate([
             'vendor_id' => 'required|exists:vendor_details,id',
+            'rental_ids' => 'required|array|min:1',
+            'rental_ids.*' => 'required|integer|distinct',
             'records' => 'required|array|min:1',
             'records.*.payment_date' => 'required|date_format:Y-m-d',
             'records.*.or_number' => 'required|string|max:50',
@@ -317,6 +319,17 @@ public function index()
 
         $vendorId = (int) $request->input('vendor_id');
         $vendor = VendorDetails::findOrFail($vendorId);
+        $rentalIds = array_map('intval', $request->input('rental_ids'));
+        $rentalsById = $vendor->rented()->whereIn('id', $rentalIds)->get()->keyBy('id');
+        $selectedRentals = collect($rentalIds)
+            ->map(fn ($rentalId) => $rentalsById->get($rentalId));
+
+        if ($selectedRentals->contains(null) || $selectedRentals->contains(fn ($rental) => $rental->status === 'vacant')) {
+            throw \Illuminate\Validation\ValidationException::withMessages([
+                'rental_ids' => 'Select active rentals belonging to this vendor.',
+            ]);
+        }
+
         $records = $request->input('records');
 
         $summary = [
@@ -325,7 +338,7 @@ public function index()
             'rejected' => [],
         ];
 
-        DB::transaction(function () use ($vendor, $vendorId, $records, &$summary) {
+        DB::transaction(function () use ($selectedRentals, $vendorId, $records, &$summary) {
             foreach ($records as $index => $entry) {
                 $paymentDate = trim((string) ($entry['payment_date'] ?? ''));
                 $orNumber = trim((string) ($entry['or_number'] ?? ''));
@@ -354,25 +367,29 @@ public function index()
                     continue;
                 }
 
-                $selectedRental = $vendor->rented()->where('status', '!=', 'vacant')->first();
-                if (!$selectedRental) {
-                    $selectedRental = $vendor->rented()->first();
+                $amountCents = (int) round($amount * 100);
+                $baseCents = intdiv($amountCents, $selectedRentals->count());
+                $remainingCents = $amountCents % $selectedRentals->count();
+
+                foreach ($selectedRentals->values() as $rentalIndex => $rental) {
+                    $allocationCents = $baseCents + ($rentalIndex < $remainingCents ? 1 : 0);
+                    if ($allocationCents <= 0) {
+                        continue;
+                    }
+
+                    Payments::create([
+                        'rented_id' => $rental->id,
+                        'vendor_id' => $vendorId,
+                        'payment_type' => 'historical',
+                        'amount' => number_format($allocationCents / 100, 2, '.', ''),
+                        'or_number' => $orNumber,
+                        'payment_date' => $paymentDate,
+                        'missed_days' => 0,
+                        'advance_days' => 0,
+                        'status' => 'collected',
+                    ]);
+                    $summary['imported']++;
                 }
-
-                $paymentData = [
-                    'rented_id' => $selectedRental ? $selectedRental->id : null,
-                    'vendor_id' => $vendorId,
-                    'payment_type' => 'historical',
-                    'amount' => number_format($amount, 2, '.', ''),
-                    'or_number' => $orNumber,
-                    'payment_date' => $paymentDate,
-                    'missed_days' => 0,
-                    'advance_days' => 0,
-                    'status' => 'collected',
-                ];
-
-                Payments::create($paymentData);
-                $summary['imported']++;
             }
         });
 
@@ -398,7 +415,10 @@ public function index()
         try {
             $records = $recognizer->recognize($validated['image']);
         } catch (\RuntimeException $exception) {
-            return response()->json(['message' => $exception->getMessage()], 502);
+            $status = $exception->getCode() === 503 ? 503 : 502;
+            $headers = $status === 503 ? ['Retry-After' => '2'] : [];
+
+            return response()->json(['message' => $exception->getMessage()], $status, $headers);
         }
 
         return response()->json(['records' => $records]);
