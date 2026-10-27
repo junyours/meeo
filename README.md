@@ -65,3 +65,7 @@ If you discover a security vulnerability within Laravel, please send an e-mail t
 
 The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
 "# meeo" 
+
+## Recording multiple vendor payments
+
+Use the **Add Multiple Payments** action on a vendor to select one or more active stalls, add as many payment rows as needed, and enter each payment date, OR number, and total amount. Each row's amount is split evenly across the selected stalls. Review the total before saving. Images and OCR are not required.
