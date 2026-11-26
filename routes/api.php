@@ -3,6 +3,7 @@
 use App\Http\Controllers\ActivitySalesReportController;
 use App\Http\Controllers\AdminController;
 use App\Http\Controllers\Admin\CollectorAccountController;
+use App\Http\Controllers\Admin\DailyCollectionOverviewController;
 use App\Http\Controllers\AdminProfileController;
 use App\Http\Controllers\AvailableStallController;
 use App\Http\Controllers\Api\AvailableProductsController;
@@ -22,11 +23,15 @@ use App\Http\Controllers\MarketLayoutController;
 use App\Http\Controllers\MarketOpenSpaceController;
 use App\Http\Controllers\Mobile\MobileAuthController;
 use App\Http\Controllers\Mobile\MobileCollectorController;
+use App\Http\Controllers\Mobile\MobileVendorBalancesController;
+use App\Http\Controllers\Mobile\MobileSlaughterCollectorController;
 use App\Http\Controllers\OfficeActivitiesController;
 use App\Http\Controllers\PaymentManagementController;
 use App\Http\Controllers\PaymentMonitoringController;
 use App\Http\Controllers\RentalReportController;
 use App\Http\Controllers\SectionController;
+use App\Http\Controllers\Staff\DailyCollectionOverviewController as StaffDailyCollectionOverviewController;
+use App\Http\Controllers\Staff\AnimalManagementController as StaffAnimalManagementController;
 use App\Http\Controllers\SlaughterhouseCollectionController;
 use App\Http\Controllers\StallController;
 use App\Http\Controllers\StallRateHistoryController;
@@ -34,9 +39,11 @@ use App\Http\Controllers\TargetCollectionController;
 use App\Http\Controllers\VendorAnalysisController;
 use App\Http\Controllers\VendorController;
 use App\Http\Controllers\VendorManagementController;
+use App\Http\Controllers\VendorMonthlyBalanceReportController;
 use App\Http\Controllers\VendorQrCodeController;
 use App\Http\Controllers\VendorPaymentCalendarController;
 use App\Http\Controllers\VendorPaymentController;
+use App\Http\Controllers\VendorOtherPaymentController;
 use Illuminate\Support\Facades\Route;
 
 /*
@@ -54,6 +61,8 @@ Route::prefix('mobile')->group(function () {
         Route::get('/bootstrap', [MobileCollectorController::class, 'bootstrap']);
         Route::get('/vendors/search', [MobileCollectorController::class, 'search']);
         Route::get('/vendors/qr/{token}', [MobileCollectorController::class, 'scan']);
+        Route::get('/vendor-balances', [MobileVendorBalancesController::class, 'index']);
+        Route::get('/vendor-balances/{vendorId}', [MobileVendorBalancesController::class, 'show']);
         Route::post('/collections/quote', [MobileCollectorController::class, 'quote']);
         Route::post('/collections', [MobileCollectorController::class, 'createCollection']);
         Route::get('/collections', [MobileCollectorController::class, 'collections']);
@@ -68,6 +77,7 @@ Route::prefix('mobile')->group(function () {
 // Admin Profile Routes
 Route::middleware('auth:sanctum')->prefix('admin')->group(function () {
     Route::get('/profile', [AdminProfileController::class, 'getProfile']);
+    Route::get('/daily-collections', [DailyCollectionOverviewController::class, 'index']);
     Route::post('/send-otp', [AdminProfileController::class, 'sendOTP']);
     Route::post('/verify-otp', [AdminProfileController::class, 'verifyOTP']);   
     Route::put('/profile', [AdminProfileController::class, 'updateProfile']);
@@ -81,6 +91,16 @@ Route::middleware('auth:sanctum')->prefix('admin')->group(function () {
         Route::get('/payment/{paymentId}', [MarketOpenSpaceController::class, 'getPaymentDetails']);
         Route::post('/grouped-payment-details', [MarketOpenSpaceController::class, 'getGroupedPaymentDetails']);
     });
+});
+
+Route::middleware('auth:sanctum')->prefix('staff')->group(function () {
+    Route::get('/animals', [StaffAnimalManagementController::class, 'index']);
+    Route::post('/animals', [StaffAnimalManagementController::class, 'store']);
+    Route::put('/animals/{animalId}', [StaffAnimalManagementController::class, 'update']);
+    Route::delete('/animals/{animalId}', [StaffAnimalManagementController::class, 'destroy']);
+    Route::get('/daily-collections', [StaffDailyCollectionOverviewController::class, 'index']);
+    Route::get('/stall-rate-changes', [StallRateHistoryController::class, 'getStaffRateChangeHistory']);
+    Route::put('/stall-rate-changes/{historyId}', [StallRateHistoryController::class, 'updateStaffRateChange']);
 });
 
 
@@ -230,6 +250,14 @@ Route::middleware('auth:sanctum')->prefix('vendor-payments')->group(function () 
    
 });
 
+Route::middleware('auth:sanctum')->prefix('vendor-other-payments')->group(function () {
+    Route::get('/report', [VendorOtherPaymentController::class, 'report']);
+    Route::get('/admin/payer-report', [VendorOtherPaymentController::class, 'adminPayerReport']);
+    Route::get('/staff/payer-report', [VendorOtherPaymentController::class, 'staffPayerReport']);
+    Route::get('/eligibility', [VendorOtherPaymentController::class, 'eligibility']);
+    Route::post('/', [VendorOtherPaymentController::class, 'store']);
+});
+
 // �💰 Payment Monitoring Routes
 Route::middleware('auth:sanctum')->prefix('payment-monitoring')->group(function () {
     Route::get('/monthly-monitoring', [PaymentMonitoringController::class, 'getMonthlyMonitoring']);
@@ -295,6 +323,11 @@ Route::middleware('auth:sanctum')->prefix('slaughterhouse')->group(function () {
     Route::delete('/collections/{id}', [SlaughterhouseCollectionController::class, 'destroy']);
 });
 
+Route::middleware('auth:sanctum')->prefix('mobile/slaughter-collector')->group(function () {
+    Route::get('/animals', [MobileSlaughterCollectorController::class, 'animals']);
+    Route::post('/collections', [MobileSlaughterCollectorController::class, 'store']);
+});
+
 // � Vendor Payment Calendar Routes
 Route::middleware('auth:sanctum')->prefix('vendor-payment-calendar')->group(function () {
     Route::get('/', [VendorPaymentCalendarController::class, 'index']);
@@ -350,6 +383,11 @@ Route::prefix('vendor-analysis')->group(function () {
     Route::get('/get-or-numbers', [VendorAnalysisController::class, 'getOrNumbersForDate']);
     Route::get('/all-vendors-with-balances', [VendorAnalysisController::class, 'getAllVendorsWithBalances']);
 });
+
+Route::middleware('auth:sanctum')->get(
+    '/vendor-monthly-balances',
+    [VendorMonthlyBalanceReportController::class, 'index']
+);
 
 
 

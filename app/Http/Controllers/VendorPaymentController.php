@@ -371,7 +371,7 @@ class VendorPaymentController extends Controller
                     Payments::create([
                         'rented_id' => $rental->id,
                         'vendor_id' => $vendorId,
-                        'payment_type' => 'historical',
+                        'payment_type' => 'daily',
                         'amount' => number_format($allocationCents / 100, 2, '.', ''),
                         'or_number' => $orNumber,
                         'payment_date' => $paymentDate,
@@ -1447,6 +1447,7 @@ class VendorPaymentController extends Controller
                     $monthlyTotals[$month]['monthly_rate'] += $monthBalance['monthly_rate'];
                     $monthlyTotals[$month]['payment'] += $monthBalance['payment'];
                     $monthlyTotals[$month]['balance'] += $monthBalance['balance'];
+                    $monthlyTotals[$month]['deposit'] += $monthBalance['deposit'];
                 }
             }
         }
@@ -1456,11 +1457,9 @@ class VendorPaymentController extends Controller
             $totalPayment = $monthlyTotals[$month]['payment'];
             $totalMonthlyRate = $monthlyTotals[$month]['monthly_rate'];
 
-            // Calculate deposit: total payments - total monthly rate across all rentals
-            $deposit = $totalPayment > $totalMonthlyRate ? $totalPayment - $totalMonthlyRate : 0;
-
-            // If there's a deposit, balance should be 0, otherwise calculate normally
-            $balance = $deposit > 0 ? 0 : $totalMonthlyRate - $totalPayment;
+            // Keep each stall's deposit separate; section totals are sums of their stalls.
+            $deposit = $monthlyTotals[$month]['deposit'];
+            $balance = $monthlyTotals[$month]['balance'];
 
             $vendorBalances[] = [
                 'month' => $month,
@@ -1580,195 +1579,304 @@ class VendorPaymentController extends Controller
             'rental_ids' => 'required|array',
             'rental_ids.*' => 'exists:rented,id',
             'amounts' => 'required|array',
-            'amounts.*' => 'required|numeric|min:1',
+            'amounts.*' => 'required|numeric|min:0.01',
             'payment_types' => 'required|array',
             'payment_types.*' => 'required|in:partial,fully paid,advance,daily',
             'advance_days' => 'nullable|array',
             'advance_days.*' => 'nullable|integer|min:0',
             'or_number' => 'required|string|max:50',
             'payment_date' => 'required|date',
-            'payment_id' => 'required|integer|exists:payments,id',
+            'payment_id' => 'nullable|required_without:deposit_month|integer|exists:payments,id',
+            'source_rental_ids' => 'required_without:payment_id|array|min:1',
+            'source_rental_ids.*' => 'integer|distinct|exists:rented,id',
+            'deposit_month' => 'required_without:payment_id|integer|min:0|max:11',
+            'deposit_year' => 'required_with:deposit_month|integer|min:2000|max:2100',
             'consume_deposit' => 'required|boolean',
             'custom_amount' => 'nullable|numeric|min:0',
         ]);
 
-        $rentalIds = $request->input('rental_ids');
-        $amounts = $request->input('amounts');
-        $paymentTypes = $request->input('payment_types');
-        $advanceDays = $request->input('advance_days', []);
-        $orNumber = $request->input('or_number');
-        $paymentDate = Carbon::parse($request->input('payment_date'));
-        $depositPaymentId = $request->input('payment_id');
-        $customAmount = $request->input('custom_amount'); // Get custom amount
-        $now = now();
-        $results = [];
+        return DB::transaction(function () use ($request, $vendor) {
+            $vendor = VendorDetails::whereKey($vendor->id)->lockForUpdate()->firstOrFail();
+            $rentalIds = $request->input('rental_ids');
+            $amounts = $request->input('amounts');
+            $paymentTypes = $request->input('payment_types');
+            $advanceDays = $request->input('advance_days', []);
+            $orNumber = $request->input('or_number');
+            $paymentDate = Carbon::parse($request->input('payment_date'));
+            $customAmount = $request->input('custom_amount');
+            $now = now();
+            $results = [];
 
-        // Get the payment record that contains the deposit
-        $depositPayment = Payments::findOrFail($depositPaymentId);
-
-        // Verify this payment belongs to the vendor
-        if ($depositPayment->vendor_id !== $vendor->id) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Deposit payment does not belong to this vendor.',
-            ], 403);
-        }
-
-        // Calculate available deposit from the month across all rentals (not individual payment)
-        // Get the month when the payment was made
-        $paymentMonth = Carbon::parse($depositPayment->payment_date)->month;
-        $paymentYear = Carbon::parse($depositPayment->payment_date)->year;
-
-        // Get all rentals for this vendor
-        $vendorRentals = $vendor->rented()
-            ->with('stall')
-            ->get();
-        $vendorRentalsById = $vendorRentals->keyBy('id');
-        $monthStart = Carbon::create($paymentYear, $paymentMonth, 1)->startOfDay();
-        $monthEnd = $monthStart->copy()->endOfMonth()->endOfDay();
-
-        // Calculate total monthly rate across all rentals for this month
-        $totalMonthlyRate = 0;
-        $totalMonthPayments = 0;
-
-        foreach ($vendorRentals as $rental) {
-            $isMonthlyStall = $rental->stall && $rental->stall->is_monthly;
-
-            // Calculate monthly rate for this rental
-            if ($isMonthlyStall) {
-                $rentalMonthlyRate = $rental->monthly_rent ?: ($rental->stall->monthly_rate ?? 0);
-            } else {
-                // For daily stalls, get the actual days in that month
-                $isLeapYear = ($paymentYear % 4 == 0 && ($paymentYear % 100 != 0 || $paymentYear % 400 == 0));
-                $daysInMonth = [31, $isLeapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][$paymentMonth - 1];
-                $rentalMonthlyRate = $rental->daily_rent * $daysInMonth;
-            }
-
-            $totalMonthlyRate += $rentalMonthlyRate;
-
-        }
-
-        $totalMonthPayments = Payments::where('vendor_id', $vendor->id)
-            ->where('status', 'collected')
-            ->whereBetween('payment_date', [$monthStart, $monthEnd])
-            ->sum('amount');
-
-        // Calculate total available deposit across all rentals
-        $availableDeposit = max(0, $totalMonthPayments - $totalMonthlyRate);
-
-        if ($availableDeposit <= 0) {
-            return response()->json([
-                'success' => false,
-                'message' => 'No deposit available to consume.',
-            ], 400);
-        }
-
-        // Calculate total amount needed for current payment
-        $totalAmountNeeded = $customAmount ?: array_sum($amounts);
-
-        if ($totalAmountNeeded > $availableDeposit) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Insufficient deposit. Available: ₱'.number_format($availableDeposit, 2).', Needed: ₱'.number_format($totalAmountNeeded, 2),
-            ], 400);
-        }
-
-        // Process payments using deposit
-        foreach ($rentalIds as $index => $rentalId) {
-            $amount = $amounts[$index];
-            $paymentType = $paymentTypes[$index];
-            $frontendAdvanceDays = isset($advanceDays[$index]) ? $advanceDays[$index] : null;
-
-            $rental = $vendorRentalsById->get($rentalId);
-
-            if (! $rental) {
-                abort(404);
-            }
-
-            if ($rental->vendor_id !== $vendor->id) {
-                $results[] = [
-                    'rental_id' => $rentalId,
+            if (count($rentalIds) !== count($amounts) || count($rentalIds) !== count($paymentTypes)) {
+                return response()->json([
                     'success' => false,
-                    'message' => 'This rental does not belong to the specified vendor.',
-                ];
-
-                continue;
+                    'message' => 'Each selected stall must have exactly one payment amount and payment type.',
+                ], 422);
             }
 
-            // Check if stall has active advance payment
-            if ($rental->status === 'advance' && $rental->next_due_date) {
-                $nextDueDate = Carbon::parse($rental->next_due_date);
+            if ($request->filled('deposit_month')) {
+                $paymentMonth = (int) $request->input('deposit_month') + 1;
+                $paymentYear = (int) $request->input('deposit_year');
+                $depositPayment = null;
+            } else {
+                $depositPayment = Payments::findOrFail($request->input('payment_id'));
 
-                if ($nextDueDate->gt($now)) {
+                if ($depositPayment->vendor_id !== $vendor->id) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Deposit payment does not belong to this vendor.',
+                    ], 403);
+                }
+
+                $paymentMonth = Carbon::parse($depositPayment->payment_date)->month;
+                $paymentYear = Carbon::parse($depositPayment->payment_date)->year;
+            }
+            $sourceRentalIds = array_values(array_unique(array_map(
+                'intval',
+                $request->input('source_rental_ids', [])
+            )));
+            if ($sourceRentalIds === [] && $depositPayment?->rented_id) {
+                $sourceRentalIds = [(int) $depositPayment->rented_id];
+            }
+
+            // Get all rentals for this vendor
+            $yearStart = Carbon::create($paymentYear, 1, 1)->startOfDay();
+            $yearEnd = Carbon::create($paymentYear, 12, 31)->endOfDay();
+            $vendorRentals = $vendor->rented()
+                ->with([
+                    'stall',
+                    'payments' => function ($paymentQuery) use ($yearStart, $yearEnd) {
+                        $paymentQuery->select('id', 'rented_id', 'payment_date', 'status', 'amount')
+                            ->whereBetween('payment_date', [$yearStart, $yearEnd]);
+                    },
+                ])
+                ->get();
+            $vendorRentalsById = $vendorRentals->keyBy('id');
+
+            $depositByRentalCents = $vendorRentals
+                ->filter(function ($rental) {
+                    return $rental->status !== 'unoccupied'
+                        && $rental->stall
+                        && $rental->stall->status !== 'vacant';
+                })
+                ->mapWithKeys(function ($rental) use ($paymentYear, $paymentMonth) {
+                    $balances = $this->calculateMonthlyBalancesForRentalOptimized($rental, $paymentYear);
+
+                    return [
+                        $rental->id => (int) round((float) ($balances[$paymentMonth - 1]['deposit'] ?? 0) * 100),
+                    ];
+                });
+            $selectedSourceBalances = $depositByRentalCents->only($sourceRentalIds);
+            if ($selectedSourceBalances->count() !== count($sourceRentalIds)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'A selected deposit source does not belong to this vendor or is not active.',
+                ], 422);
+            }
+            $availableDepositCents = $selectedSourceBalances->sum();
+
+            if ($availableDepositCents <= 0) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'The selected stalls have no available deposit for this month.',
+                ], 400);
+            }
+            if ($selectedSourceBalances->contains(fn ($balanceCents) => $balanceCents <= 0)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Every selected deposit source must have an available deposit.',
+                ], 422);
+            }
+
+            $totalAmountCents = array_sum(array_map(
+                fn ($amount) => (int) round((float) $amount * 100),
+                $amounts
+            ));
+            $totalAmountNeeded = $totalAmountCents / 100;
+            $customAmountCents = $customAmount === null
+                ? $totalAmountCents
+                : (int) round((float) $customAmount * 100);
+
+            if ($customAmountCents !== $totalAmountCents) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'The payment allocations must add up to the deposit amount being consumed.',
+                ], 422);
+            }
+
+            if ($totalAmountCents > $availableDepositCents) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Insufficient deposit in the selected stalls. Available: ₱'.number_format($availableDepositCents / 100, 2).', Needed: ₱'.number_format($totalAmountNeeded, 2),
+                ], 400);
+            }
+
+            foreach ($rentalIds as $rentalId) {
+                $rental = $vendorRentalsById->get($rentalId);
+
+                if (! $rental || $rental->vendor_id !== $vendor->id) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'A selected stall does not belong to this vendor.',
+                    ], 403);
+                }
+
+                if ($rental->status === 'unoccupied') {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'Removed stalls can only be paid through Pay Balance.',
+                    ], 422);
+                }
+
+                if ($rental->status === 'advance' && $rental->next_due_date) {
+                    $nextDueDate = Carbon::parse($rental->next_due_date);
+
+                    if ($nextDueDate->gt($now)) {
+                        return response()->json([
+                            'success' => false,
+                            'message' => "This stall has an active advance payment and cannot be paid until {$nextDueDate->toDateString()}. Next due date: {$nextDueDate->toDateString()}.",
+                        ], 422);
+                    }
+                }
+            }
+
+            // Process payments using deposit
+            $createdPaymentIds = [];
+            foreach ($rentalIds as $index => $rentalId) {
+                $amount = $amounts[$index];
+                $paymentType = $paymentTypes[$index];
+                $frontendAdvanceDays = isset($advanceDays[$index]) ? $advanceDays[$index] : null;
+
+                $rental = $vendorRentalsById->get($rentalId);
+
+                if (! $rental) {
+                    abort(404);
+                }
+
+                if ($rental->vendor_id !== $vendor->id) {
                     $results[] = [
                         'rental_id' => $rentalId,
                         'success' => false,
-                        'message' => "This stall has an active advance payment and cannot be paid until {$nextDueDate->toDateString()}. Next due date: {$nextDueDate->toDateString()}.",
+                        'message' => 'This rental does not belong to the specified vendor.',
                     ];
 
                     continue;
                 }
+
+                // Check if stall has active advance payment
+                if ($rental->status === 'advance' && $rental->next_due_date) {
+                    $nextDueDate = Carbon::parse($rental->next_due_date);
+
+                    if ($nextDueDate->gt($now)) {
+                        $results[] = [
+                            'rental_id' => $rentalId,
+                            'success' => false,
+                            'message' => "This stall has an active advance payment and cannot be paid until {$nextDueDate->toDateString()}. Next due date: {$nextDueDate->toDateString()}.",
+                        ];
+
+                        continue;
+                    }
+                }
+
+                // Process payment using deposit - create a special payment record
+                $payment = Payments::create([
+                    'rented_id' => $rental->id,
+                    'vendor_id' => $rental->vendor_id,
+                    'payment_type' => $paymentType,
+                    'amount' => $amount,
+                    'or_number' => $orNumber,
+                    'payment_date' => $paymentDate,
+                    'missed_days' => 0, // Deposit consumption doesn't cover missed days
+                    'advance_days' => 0, // Deposit consumption doesn't create advance days
+                    'status' => 'collected',
+                ]);
+                $createdPaymentIds[] = $payment->id;
+
+                // Update rental status based on payment type
+                if ($paymentType === 'daily') {
+                    $rental->last_payment_date = $paymentDate;
+                    $rental->next_due_date = $paymentDate->copy()->addDay()->toDateString();
+                    $rental->status = 'occupied';
+                } elseif ($paymentType === 'fully paid') {
+                    $rental->last_payment_date = $paymentDate;
+                    $rental->next_due_date = $paymentDate->copy()->addDay()->toDateString();
+                    $rental->status = 'fully paid';
+                    $rental->missed_days = 0;
+                    $rental->remaining_balance = 0;
+                }
+
+                $rental->save();
+
+                $results[] = [
+                    'rental_id' => $rentalId,
+                    'success' => true,
+                    'message' => 'Payment processed successfully using deposit.',
+                    'payment' => $payment,
+                    'or_number' => $orNumber,
+                ];
             }
 
-            // Process payment using deposit - create a special payment record
-            $payment = Payments::create([
-                'rented_id' => $rental->id,
-                'vendor_id' => $rental->vendor_id,
-                'payment_type' => $paymentType,
-                'amount' => $amount,
-                'or_number' => $orNumber,
-                'payment_date' => $paymentDate,
-                'missed_days' => 0, // Deposit consumption doesn't cover missed days
-                'advance_days' => 0, // Deposit consumption doesn't create advance days
-                'status' => 'collected',
-            ]);
+            // Deduct only from the selected source stalls, capped by each stall's deposit.
+            $remainingToDeductCents = $totalAmountCents;
+            $sourceDeductions = [];
+            foreach ($sourceRentalIds as $sourceRentalId) {
+                if ($remainingToDeductCents <= 0) {
+                    break;
+                }
 
-            // Update rental status based on payment type
-            if ($paymentType === 'daily') {
-                $rental->last_payment_date = $paymentDate;
-                $rental->next_due_date = $paymentDate->copy()->addDay()->toDateString();
-                $rental->status = 'occupied';
-            } elseif ($paymentType === 'fully paid') {
-                $rental->last_payment_date = $paymentDate;
-                $rental->next_due_date = $paymentDate->copy()->addDay()->toDateString();
-                $rental->status = 'fully paid';
-                $rental->missed_days = 0;
-                $rental->remaining_balance = 0;
+                $deductCents = min(
+                    (int) $depositByRentalCents->get($sourceRentalId, 0),
+                    $remainingToDeductCents
+                );
+                if ($deductCents <= 0) {
+                    continue;
+                }
+
+                $actualDeducted = $this->deductDepositFromPayments(
+                    $vendor,
+                    $paymentMonth,
+                    $paymentYear,
+                    $deductCents / 100,
+                    $createdPaymentIds,
+                    [$sourceRentalId]
+                );
+                $actualDeductedCents = (int) round($actualDeducted * 100);
+                if ($actualDeductedCents !== $deductCents) {
+                    throw new \RuntimeException('Unable to deduct the full deposit from the selected stall.');
+                }
+
+                $sourceDeductions[] = [
+                    'rental_id' => $sourceRentalId,
+                    'amount' => $deductCents / 100,
+                ];
+                $remainingToDeductCents -= $deductCents;
             }
 
-            $rental->save();
+            if ($remainingToDeductCents > 0) {
+                throw new \RuntimeException('Unable to deduct the full deposit from the selected stalls.');
+            }
 
-            $results[] = [
-                'rental_id' => $rentalId,
+            // Recalculate monthly balances after deposit consumption
+            $this->recalculateMonthlyBalances($vendor, $paymentMonth, $paymentYear);
+
+            // Calculate remaining deposit for response
+            $remainingDeposit = ($availableDepositCents - $totalAmountCents) / 100;
+
+            return response()->json([
                 'success' => true,
-                'message' => 'Payment processed successfully using deposit.',
-                'payment' => $payment,
-                'or_number' => $orNumber,
-            ];
-        }
-
-        // Update payments to track deposit consumption - deduct from highest payments first
-        $this->deductDepositFromPayments($vendor, $paymentMonth, $paymentYear, $totalAmountNeeded);
-
-        // Recalculate monthly balances after deposit consumption
-        $this->recalculateMonthlyBalances($vendor, $paymentMonth, $paymentYear);
-
-        // Calculate remaining deposit for response
-        $remainingDeposit = $availableDeposit - $totalAmountNeeded;
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Deposit consumed successfully.',
-            'results' => $results,
-            'total_amount_consumed' => $totalAmountNeeded,
-            'remaining_deposit' => $remainingDeposit,
-        ]);
+                'message' => 'Deposit consumed successfully.',
+                'results' => $results,
+                'total_amount_consumed' => $totalAmountNeeded,
+                'remaining_deposit' => $remainingDeposit,
+                'source_deductions' => $sourceDeductions,
+            ]);
+        });
     }
 
     /**
      * Deduct deposit amount from payments, starting with highest amounts first
      */
-    private function deductDepositFromPayments($vendor, $paymentMonth, $paymentYear, $amountToDeduct)
+    private function deductDepositFromPayments($vendor, $paymentMonth, $paymentYear, $amountToDeduct, $excludedPaymentIds = [], $sourceRentalIds = [])
     {
 
         // Get all payments for this vendor in the specified month, sorted by amount (highest first)
@@ -1778,9 +1886,15 @@ class VendorPaymentController extends Controller
         $allPayments = Payments::where('vendor_id', $vendor->id)
             ->where('status', 'collected')
             ->whereHas('rented', function ($query) use ($vendor) {
-                $query->where('vendor_id', $vendor->id);
+                $query->where('vendor_id', $vendor->id)
+                    ->where('status', '!=', 'unoccupied')
+                    ->whereHas('stall', function ($stallQuery) {
+                        $stallQuery->where('status', '!=', 'vacant');
+                    });
             })
             ->whereBetween('payment_date', [$monthStart, $monthEnd])
+            ->whereNotIn('id', $excludedPaymentIds)
+            ->whereIn('rented_id', $sourceRentalIds)
             ->orderByDesc('amount')
             ->get();
 

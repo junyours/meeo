@@ -19,6 +19,7 @@ use App\Models\StallRemovalRequest;
 use App\Models\Stalls;
 use App\Models\User;
 use App\Models\VendorDetails;
+use App\Models\VendorOtherPayment;
 
 use Carbon\Carbon;
 use Illuminate\Http\Request;
@@ -199,8 +200,16 @@ public function display(Request $request)
         // Get available years from payments
         $availableYears = Payments::selectRaw('YEAR(payment_date) as year')
             ->distinct()
-            ->orderBy('year', 'desc')
             ->pluck('year')
+            ->merge(
+                VendorOtherPayment::paid()
+                    ->selectRaw('YEAR(payment_date) as year')
+                    ->distinct()
+                    ->pluck('year')
+            )
+            ->unique()
+            ->sortDesc()
+            ->values()
             ->toArray();
             
         if (empty($availableYears)) {
@@ -329,6 +338,7 @@ public function display(Request $request)
             + (float) CashTicketsPayment::whereHas('cashTicket', function ($query) {
                 $query->whereIn('enterprise', ['Market', 'Wharf']);
             })->sum('amount_paid')
+            + (float) VendorOtherPayment::paid()->sum('amount')
             + (float) DB::table('slaughterhouse_collections')
                 ->join('slaughterhouse_collection_items', function ($join) {
                     $join->on(
@@ -386,6 +396,7 @@ private function getCollectionSourceData(int $year, int $month): array
     foreach ([$year - 1, $year] as $collectionYear) {
         $monthlyTotals[$collectionYear] = [
             'market_payments' => array_fill(1, 12, 0.0),
+            'market_other_payments' => array_fill(1, 12, 0.0),
             'market_tickets' => array_fill(1, 12, 0.0),
             'wharf_tickets' => array_fill(1, 12, 0.0),
             'slaughter' => array_fill(1, 12, 0.0),
@@ -409,6 +420,16 @@ private function getCollectionSourceData(int $year, int $month): array
             ->groupByRaw('YEAR(payment_date), MONTH(payment_date)')
             ->get(),
         'market_payments'
+    );
+
+    $storeMonthlyRows(
+        VendorOtherPayment::query()
+            ->paid()
+            ->whereBetween('payment_date', [$startDate, $endDate])
+            ->selectRaw('YEAR(payment_date) AS collection_year, MONTH(payment_date) AS collection_month, SUM(amount) AS total_amount')
+            ->groupByRaw('YEAR(payment_date), MONTH(payment_date)')
+            ->get(),
+        'market_other_payments'
     );
 
     foreach (['Market' => 'market_tickets', 'Wharf' => 'wharf_tickets'] as $enterprise => $source) {
@@ -446,6 +467,7 @@ private function getCollectionSourceData(int $year, int $month): array
         return [
             'month' => Carbon::create($year, $monthNumber, 1)->format('M'),
             'market' => $monthlyTotals[$year]['market_payments'][$monthNumber]
+                + $monthlyTotals[$year]['market_other_payments'][$monthNumber]
                 + $monthlyTotals[$year]['market_tickets'][$monthNumber],
             'wharf' => $monthlyTotals[$year]['wharf_tickets'][$monthNumber],
             'slaughter' => $monthlyTotals[$year]['slaughter'][$monthNumber],
@@ -455,6 +477,7 @@ private function getCollectionSourceData(int $year, int $month): array
     $monthlySourceTotals = function (int $collectionYear) use ($monthlyTotals): array {
         return [
             'market' => array_sum($monthlyTotals[$collectionYear]['market_payments'])
+                + array_sum($monthlyTotals[$collectionYear]['market_other_payments'])
                 + array_sum($monthlyTotals[$collectionYear]['market_tickets']),
             'wharf' => array_sum($monthlyTotals[$collectionYear]['wharf_tickets']),
             'slaughter' => array_sum($monthlyTotals[$collectionYear]['slaughter']),
@@ -463,6 +486,7 @@ private function getCollectionSourceData(int $year, int $month): array
 
     $selectedMonthTotals = [
         'market' => $monthlyTotals[$year]['market_payments'][$month]
+            + $monthlyTotals[$year]['market_other_payments'][$month]
             + $monthlyTotals[$year]['market_tickets'][$month],
         'wharf' => $monthlyTotals[$year]['wharf_tickets'][$month],
         'slaughter' => $monthlyTotals[$year]['slaughter'][$month],
@@ -478,6 +502,7 @@ private function getCollectionSourceData(int $year, int $month): array
     foreach (range(1, 12) as $monthNumber) {
         $automaticCollections['MARKET'][$monthNumber] =
             $monthlyTotals[$year]['market_payments'][$monthNumber]
+            + $monthlyTotals[$year]['market_other_payments'][$monthNumber]
             + $monthlyTotals[$year]['market_tickets'][$monthNumber];
     }
         $periodSourceTotals = function (int $collectionYear) use ($monthlyTotals, $month): array {
@@ -487,6 +512,7 @@ private function getCollectionSourceData(int $year, int $month): array
 
             return [
                 'market' => $sumThroughMonth($monthlyTotals[$collectionYear]['market_payments'])
+                    + $sumThroughMonth($monthlyTotals[$collectionYear]['market_other_payments'])
                     + $sumThroughMonth($monthlyTotals[$collectionYear]['market_tickets']),
                 'wharf' => $sumThroughMonth($monthlyTotals[$collectionYear]['wharf_tickets']),
                 'slaughter' => $sumThroughMonth($monthlyTotals[$collectionYear]['slaughter']),
@@ -528,6 +554,11 @@ private function getCollectionSourcesForMonth(int $year, int $month): array
         ->whereBetween('payment_date', [$startDate, $endDate])
         ->sum('amount');
 
+    $marketOtherPayments = VendorOtherPayment::query()
+        ->paid()
+        ->whereBetween('payment_date', [$startDate, $endDate])
+        ->sum('amount');
+
     $marketTickets = CashTicketsPayment::query()
         ->whereBetween('payment_date', [$startDate->toDateString(), $endDate->toDateString()])
         ->whereHas('cashTicket', fn ($query) => $query->where('enterprise', 'Market'))
@@ -549,7 +580,7 @@ private function getCollectionSourcesForMonth(int $year, int $month): array
 
     return [
         'month' => $startDate->format('F'),
-        'market' => (float) $marketPayments + (float) $marketTickets,
+        'market' => (float) $marketPayments + (float) $marketOtherPayments + (float) $marketTickets,
         'wharf' => (float) $wharfTickets,
         'slaughter' => (float) $slaughterCollections,
     ];

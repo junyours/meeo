@@ -23,6 +23,7 @@ class SlaughterhouseCollectionController extends Controller
             'hides' => ['nullable', 'numeric', 'min:0'],
             'slaughter_fee' => ['nullable', 'numeric', 'min:0'],
             'coral_fee' => ['nullable', 'numeric', 'min:0'],
+            'permit_to_slh' => ['nullable', 'numeric', 'min:0'],
         ];
     }
 
@@ -34,8 +35,9 @@ class SlaughterhouseCollectionController extends Controller
         $hides = (float) ($item['hides'] ?? 0);
         $slaughterFee = (float) ($item['slaughter_fee'] ?? 0);
         $coralFee = (float) ($item['coral_fee'] ?? 0);
+        $permitToSlh = (float) ($item['permit_to_slh'] ?? 0);
 
-        return round(($priceKilos + $anteMortem + $postMortem + $hides + $slaughterFee + $coralFee), 2);
+        return round(($priceKilos + $anteMortem + $postMortem + $hides + $slaughterFee + $coralFee + $permitToSlh), 2);
     }
 
     protected function normalizeItem(array $item): array
@@ -50,6 +52,7 @@ class SlaughterhouseCollectionController extends Controller
             'hides' => (float) ($item['hides'] ?? 0),
             'slaughter_fee' => (float) ($item['slaughter_fee'] ?? 0),
             'coral_fee' => (float) ($item['coral_fee'] ?? 0),
+            'permit_to_slh' => (float) ($item['permit_to_slh'] ?? 0),
         ];
     }
 
@@ -160,6 +163,7 @@ class SlaughterhouseCollectionController extends Controller
             'hides',
             'slaughter_fee',
             'coral_fee',
+            'permit_to_slh',
         ];
         $itemsForMonth = DB::table('slaughterhouse_collection_items as items')
             ->join('slaughterhouse_collections as collections', 'collections.id', '=', 'items.slaughterhouse_collection_id')
@@ -208,6 +212,7 @@ class SlaughterhouseCollectionController extends Controller
             ->selectRaw('COALESCE(SUM(items.hides), 0) as hides')
             ->selectRaw('COALESCE(SUM(items.slaughter_fee), 0) as slaughter_fee')
             ->selectRaw('COALESCE(SUM(items.coral_fee), 0) as coral_fee')
+            ->selectRaw('COALESCE(SUM(items.permit_to_slh), 0) as permit_to_slh')
             ->selectRaw('COALESCE(SUM(items.total_amount), 0) as grand_total')
             ->first();
 
@@ -263,12 +268,14 @@ class SlaughterhouseCollectionController extends Controller
                     'quantity',
                     'animal_type',
                     'total_kilos',
+                    'animal_weights',
                     'price_kilos',
                     'ante_mortem',
                     'post_mortem',
                     'hides',
                     'slaughter_fee',
                     'coral_fee',
+                    'permit_to_slh',
                     'total_amount',
                 ]);
             }])
@@ -285,12 +292,14 @@ class SlaughterhouseCollectionController extends Controller
                     'quantity' => (int) $item->quantity,
                     'animal_type' => $item->animal_type,
                     'total_kilos' => (float) $item->total_kilos,
+                    'animal_weights' => $item->animal_weights ?? [],
                     'price_kilos' => (float) $item->price_kilos,
                     'ante_mortem' => (float) $item->ante_mortem,
                     'post_mortem' => (float) $item->post_mortem,
                     'hides' => (float) $item->hides,
                     'slaughter_fee' => (float) $item->slaughter_fee,
                     'coral_fee' => (float) $item->coral_fee,
+                    'permit_to_slh' => (float) $item->permit_to_slh,
                     'total_amount' => (float) $item->total_amount,
                 ])->values(),
             ])
@@ -319,6 +328,7 @@ class SlaughterhouseCollectionController extends Controller
             'items.*.hides' => ['nullable', 'numeric', 'min:0'],
             'items.*.slaughter_fee' => ['nullable', 'numeric', 'min:0'],
             'items.*.coral_fee' => ['nullable', 'numeric', 'min:0'],
+            'items.*.permit_to_slh' => ['nullable', 'numeric', 'min:0'],
         ]);
 
         try {
@@ -379,6 +389,7 @@ class SlaughterhouseCollectionController extends Controller
             'items.*.hides' => ['nullable', 'numeric', 'min:0'],
             'items.*.slaughter_fee' => ['nullable', 'numeric', 'min:0'],
             'items.*.coral_fee' => ['nullable', 'numeric', 'min:0'],
+            'items.*.permit_to_slh' => ['nullable', 'numeric', 'min:0'],
         ]);
 
         DB::transaction(function () use ($collection, $validated, $request) {

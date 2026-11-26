@@ -3,9 +3,13 @@
 namespace App\Http\Controllers;
 
 use App\Models\Area;
+use App\Models\Rented;
 use App\Models\StallRateHistory;
 use App\Models\Stalls;
 use App\Services\StallRateHistoryService;
+use Carbon\Carbon;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
 
 class StallRateHistoryController extends Controller
@@ -47,6 +51,136 @@ class StallRateHistoryController extends Controller
             ->get();
 
         return response()->json(['rate_changes' => $rateChanges]);
+    }
+
+    public function getStaffRateChangeHistory()
+    {
+        $histories = StallRateHistory::with(['stall.section'])
+            ->orderBy('effective_from')
+            ->orderBy('id')
+            ->get();
+
+        if ($histories->isEmpty()) {
+            return response()->json(['rate_changes' => []]);
+        }
+
+        $stallIds = $histories->pluck('stall_id')->unique()->values();
+        $latestEffectiveDate = $histories->max('effective_from');
+        $rentalsByStall = Rented::with('vendor')
+            ->whereIn('stall_id', $stallIds)
+            ->whereDate('created_at', '<=', $latestEffectiveDate)
+            ->get()
+            ->groupBy('stall_id');
+
+        $previousRates = [];
+        $lastRatesByStall = [];
+
+        foreach ($histories as $history) {
+            $previousRates[$history->id] = $lastRatesByStall[$history->stall_id] ?? null;
+            $lastRatesByStall[$history->stall_id] = [
+                'daily_rate' => $history->daily_rate,
+                'monthly_rate' => $history->monthly_rate,
+                'annual_rate' => $history->annual_rate,
+            ];
+        }
+
+        $rateChanges = $histories
+            ->sortByDesc(fn ($history) => $history->effective_from->format('Y-m-d') . '-' . str_pad($history->id, 12, '0', STR_PAD_LEFT))
+            ->map(function ($history) use ($previousRates, $rentalsByStall) {
+                $effectiveDate = Carbon::parse($history->effective_from);
+                $vendorDate = $effectiveDate->copy()->subDay()->toDateString();
+                $activeStatuses = ['active', 'occupied', 'advance', 'temp_closed', 'partial', 'fully paid'];
+
+                $rentalBeforeChange = $rentalsByStall
+                    ->get($history->stall_id, collect())
+                    ->filter(function ($rental) use ($vendorDate, $activeStatuses) {
+                        if (!$rental->created_at || $rental->created_at->toDateString() > $vendorDate) {
+                            return false;
+                        }
+
+                        if (in_array($rental->status, $activeStatuses, true)) {
+                            return true;
+                        }
+
+                        return $rental->status === 'unoccupied'
+                            && $rental->updated_at
+                            && $rental->updated_at->toDateString() >= $vendorDate;
+                    })
+                    ->sortByDesc('created_at')
+                    ->first();
+
+                return [
+                    'id' => $history->id,
+                    'stall_id' => $history->stall_id,
+                    'stall_number' => $history->stall->stall_number ?? 'Unknown',
+                    'section_name' => $history->stall->section->name ?? 'Unknown section',
+                    'effective_from' => $history->effective_from->toDateString(),
+                    'previous_rates' => $previousRates[$history->id],
+                    'new_rates' => [
+                        'daily_rate' => $history->daily_rate,
+                        'monthly_rate' => $history->monthly_rate,
+                        'annual_rate' => $history->annual_rate,
+                    ],
+                    'is_monthly' => (bool) ($history->stall->is_monthly ?? false),
+                    'vendor_before_change' => $rentalBeforeChange?->vendor?->full_name,
+                ];
+            })
+            ->values();
+
+        return response()->json(['rate_changes' => $rateChanges]);
+    }
+
+    public function updateStaffRateChange(Request $request, $historyId)
+    {
+        $validated = $request->validate([
+            'effective_from' => ['sometimes', 'nullable', 'date'],
+            'daily_rate' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'monthly_rate' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'annual_rate' => ['sometimes', 'nullable', 'numeric', 'min:0'],
+            'is_monthly' => ['sometimes', 'boolean'],
+        ]);
+
+        $history = StallRateHistory::with('stall')->findOrFail($historyId);
+        $effectiveDate = !empty($validated['effective_from'])
+            ? Carbon::parse($validated['effective_from'])->toDateString()
+            : now()->toDateString();
+
+        DB::transaction(function () use ($history, $validated, $effectiveDate) {
+            $history->update([
+                'effective_from' => $effectiveDate,
+                'daily_rate' => $validated['daily_rate'] ?? null,
+                'monthly_rate' => $validated['monthly_rate'] ?? null,
+                'annual_rate' => $validated['annual_rate'] ?? null,
+            ]);
+
+            $stall = $history->stall;
+            if ($stall) {
+                if ($effectiveDate <= now()->toDateString()) {
+                    $currentHistory = $stall->rateHistories()
+                        ->whereDate('effective_from', '<=', now()->toDateString())
+                        ->orderByDesc('effective_from')
+                        ->orderByDesc('id')
+                        ->first();
+
+                    if ($currentHistory) {
+                        $stallUpdate = [
+                            'daily_rate' => $currentHistory->daily_rate,
+                            'monthly_rate' => $currentHistory->monthly_rate,
+                            'annual_rate' => $currentHistory->annual_rate,
+                        ];
+                        if (array_key_exists('is_monthly', $validated)) {
+                            $stallUpdate['is_monthly'] = $validated['is_monthly'];
+                        }
+                        $stall->update($stallUpdate);
+                    }
+                }
+            }
+        });
+
+        return response()->json([
+            'message' => 'Stall rate history updated successfully.',
+            'rate_change' => $history->fresh(),
+        ]);
     }
 
     /**

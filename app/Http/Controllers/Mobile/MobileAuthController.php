@@ -21,9 +21,14 @@ class MobileAuthController extends Controller
             ->orWhere('email', $credentials['username'])
             ->first();
 
+        $isSlaughterCollector = $user
+            && strtolower((string) $user->role) === 'slaughter_collector';
+        $isCollector = $user
+            && in_array($user->role, ['collector', 'incharge_collector', 'main_collector'], true);
+
         if (
             ! $user ||
-            ! in_array($user->role, ['collector', 'incharge_collector', 'main_collector'], true) ||
+            (! $isCollector && ! $isSlaughterCollector) ||
             ! Hash::check($credentials['password'], $user->password)
         ) {
             return response()->json([

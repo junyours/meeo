@@ -9,12 +9,13 @@ use Illuminate\Database\Eloquent\SoftDeletes;
 
 class SlaughterhouseCollection extends Model
 {
-    use SoftDeletes;
+     use SoftDeletes;
 
     protected $table = 'slaughterhouse_collections';
 
     protected $fillable = [
         'collection_date',
+        'client_transaction_id',
         'or_number',
         'customer_name',
         'grand_total',
@@ -26,13 +27,18 @@ class SlaughterhouseCollection extends Model
         'grand_total' => 'decimal:2',
     ];
 
+    // User who recorded the collection
     public function user()
     {
         return $this->belongsTo(User::class);
     }
 
+    // Animal collection items
     public function items()
     {
-        return $this->hasMany(SlaughterhouseCollectionItem::class, 'slaughterhouse_collection_id');
+        return $this->hasMany(
+            SlaughterhouseCollectionItem::class,
+            'slaughterhouse_collection_id'
+        );
     }
 }

@@ -7,6 +7,7 @@ use App\Models\DepartmentTarget;
 use App\Models\CashTicketsPayment;
 use App\Models\Payments;
 use App\Models\SlaughterhouseCollection;
+use App\Models\VendorOtherPayment;
 use Illuminate\Http\Request;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
@@ -566,6 +567,16 @@ class DepartmentCollectionController extends Controller
             ->get();
 
         foreach ($paymentTotals as $paymentTotal) {
+            $marketCollections[(int) $paymentTotal->month] += (float) $paymentTotal->total;
+        }
+
+        $vendorOtherPaymentTotals = VendorOtherPayment::paid()
+            ->whereYear('payment_date', $year)
+            ->selectRaw('MONTH(payment_date) as month, SUM(amount) as total')
+            ->groupByRaw('MONTH(payment_date)')
+            ->get();
+
+        foreach ($vendorOtherPaymentTotals as $paymentTotal) {
             $marketCollections[(int) $paymentTotal->month] += (float) $paymentTotal->total;
         }
 

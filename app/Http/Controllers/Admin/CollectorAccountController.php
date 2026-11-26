@@ -14,10 +14,11 @@ class CollectorAccountController extends Controller
     private const MANAGED_ROLES = [
         'collector',
         'staff',
+        'Slaughter_Collector',
     ];
 
     /**
-     * List Collector and Staff accounts.
+     * List Collector, Staff, and Slaughter Collector accounts.
      */
     public function index(Request $request)
     {
@@ -70,7 +71,7 @@ class CollectorAccountController extends Controller
     }
 
     /**
-     * Create a new Collector or Staff account.
+     * Create a new Collector, Staff, or Slaughter Collector account.
      */
     public function store(Request $request)
     {

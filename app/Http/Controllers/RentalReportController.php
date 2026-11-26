@@ -178,15 +178,32 @@ class RentalReportController extends Controller
     {
         $validated = $request->validate([
             'rented_at' => 'required|date',
+            'exit_date' => 'sometimes|required|date',
         ]);
 
         $rented = Rented::findOrFail($id);
-        $rented->created_at = Carbon::parse($validated['rented_at']);
-        $rented->save();
+        $updates = [
+            'created_at' => Carbon::parse($validated['rented_at']),
+        ];
+
+        if (array_key_exists('exit_date', $validated)) {
+            abort_unless(
+                $rented->status === 'unoccupied',
+                422,
+                'An exit date can only be updated for an exited rental.'
+            );
+
+            $exitDate = Carbon::parse($validated['exit_date'])->startOfDay();
+            $updates['updated_at'] = $exitDate->endOfDay();
+        }
+
+        DB::table('rented')
+            ->where('id', $rented->id)
+            ->update($updates);
 
         return response()->json([
             'status' => 'success',
-            'message' => 'Rented at date updated successfully',
+            'message' => 'Rental dates updated successfully',
             'data' => $rented->fresh(),
         ]);
     }

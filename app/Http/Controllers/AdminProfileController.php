@@ -46,12 +46,9 @@ class AdminProfileController extends Controller
     public function sendOTP(Request $request)
     {
         try {
-            \Log::info('sendOTP request received', [
+            \Log::info('Credential verification requested', [
                 'user_id' => Auth::id(),
                 'request_type' => $request->type,
-                'request_data' => $request->all(),
-                'has_current_password' => $request->has('current_password'),
-                'current_password_value' => $request->current_password
             ]);
 
             $validator = Validator::make($request->all(), [
@@ -71,8 +68,6 @@ class AdminProfileController extends Controller
 
             $user = Auth::user();
             
-            // Note: Password verification will be done in verifyOTP to avoid double checking
-
             // Generate OTP
             $otp = str_pad(random_int(0, 999999), 6, '0', STR_PAD_LEFT);
             $otpHash = Hash::make($otp);
@@ -97,17 +92,14 @@ class AdminProfileController extends Controller
             $cacheKey = 'admin_otp_' . Auth::id();
             Cache::put($cacheKey, $otpData, now()->addMinutes(10));
 
-            // Debug logging
-            \Log::info('OTP stored in session and cache', [
-                'cache_key' => $cacheKey,
-                'otp_data' => $otpData,
-                'session_id' => session()->getId(),
-                'user_id' => Auth::id()
+            \Log::info('Credential verification code issued', [
+                'user_id' => Auth::id(),
+                'change_type' => $request->type,
             ]);
 
             // Send OTP via email
             try {
-                Mail::raw("Your OTP for admin credential change is: {$otp}\n\nThis OTP will expire in 10 minutes.", function($message) use ($user) {
+                Mail::raw("Your OTP for account credential change is: {$otp}\n\nThis OTP will expire in 10 minutes.", function($message) use ($user) {
                     $message->to($user->email)
                             ->subject('Admin Credential Change OTP');
                 });
@@ -281,6 +273,13 @@ class AdminProfileController extends Controller
                     break;
 
                 case 'password':
+                    if (!Hash::check($request->current_password, $user->password)) {
+                        return response()->json([
+                            'success' => false,
+                            'message' => 'Current password is incorrect'
+                        ], 422);
+                    }
+
                     if (empty($request->new_password)) {
                         return response()->json([
                             'success' => false,
